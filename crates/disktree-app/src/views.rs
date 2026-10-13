@@ -2242,6 +2242,9 @@ fn filter_control(
                 .w(size::FILTER_MENU)
                 .p(space::MD)
                 .gap(space::MD)
+                // Solid, where a tooltip is not: the mosaic's labels
+                // showing through would sit behind words to be read.
+                .bg(theme.background)
                 .child(header)
                 .child(kinds)
                 .child(separator(cx))
