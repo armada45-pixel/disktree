@@ -113,11 +113,12 @@ const INSIGHT_MORE: usize = 30;
 
 /// The units a size can be typed in, in the Filter menu: each a step of
 /// the one before, in whichever of GiB and GB sizes are being shown in.
-pub fn size_units() -> [&'static str; 3] {
+/// Up to the terabyte: a disk image or a backup set is a file that big.
+pub fn size_units() -> [&'static str; 4] {
     if disktree_core::size::decimal_units() {
-        ["kB", "MB", "GB"]
+        ["kB", "MB", "GB", "TB"]
     } else {
-        ["KiB", "MiB", "GiB"]
+        ["KiB", "MiB", "GiB", "TiB"]
     }
 }
 

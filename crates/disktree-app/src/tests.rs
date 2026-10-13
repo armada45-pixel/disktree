@@ -2464,6 +2464,20 @@ fn a_size_has_a_dropdown_for_its_unit_and_a_cross_to_empty_it(
         assert_eq!(app.filter_least, Some(150 << 10));
     });
 
+    // The largest unit on offer is the terabyte.
+    let (_, most) =
+        read(&view, cx, |app| app.size_inputs.clone()).expect("the fields");
+    cx.update(|window, cx| {
+        most.update(cx, |field, cx| field.set_value("1.5", window, cx));
+        selects[1].update(cx, |select, cx| select.set_selected(Some(3), cx));
+    });
+    cx.run_until_parked();
+    draw(cx);
+    read(&view, cx, |app| {
+        assert_eq!(crate::state::size_units()[3], "TiB");
+        assert_eq!(app.filter_most, Some(3 << 39));
+    });
+
     // The cross in the field empties it and lifts that limit.
     let clear = cx.debug_bounds("filter-least-clear").expect("the cross");
     cx.simulate_click(clear.center(), gpui_kit::Modifiers::none());
