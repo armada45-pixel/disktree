@@ -1803,7 +1803,7 @@ fn power_efficiency(app: &Disktree, cx: &Context<'_, Disktree>) -> Div {
 fn trail_and_legend(
     app: &Disktree,
     theme: &Theme,
-    window: &Window,
+    window: &mut Window,
     cx: &mut Context<'_, Disktree>,
 ) -> Div {
     let mut row = div()
@@ -1895,10 +1895,9 @@ fn menu_heading(title: &'static str, hint: &'static str, theme: &Theme) -> Div {
 fn filter_control(
     app: &Disktree,
     theme: &Theme,
-    window: &Window,
+    window: &mut Window,
     cx: &mut Context<'_, Disktree>,
 ) -> Div {
-    use crate::state::size_units;
     use gpui_omarchy::{IconName, Status};
 
     let highlight = palette::highlight(theme);
@@ -2056,10 +2055,10 @@ fn filter_control(
     }
 
     let warning = widgets::alert_color(Status::Warning, cx);
-    // One block for each side: its name and what it bounds above the
-    // field, then the field beside the unit it is read in, so "from 500
-    // MiB to 4 GiB" is typed the way it is said.
-    let mut sides = div().flex().flex_col().gap(space::MD);
+    // Min and Max on one line, read left to right as the range is said:
+    // "from 500 MiB to 4 GiB". Each is named above its field, and has its
+    // unit in a dropdown beside it and a cross in it that empties it.
+    let mut sides = div().flex().flex_row().items_start().gap(space::MD);
     for (side, (label, hint, id, input)) in [
         ("Min size", "at least", "filter-least", &least),
         ("Max size", "at most", "filter-most", &most),
@@ -2067,43 +2066,32 @@ fn filter_control(
     .into_iter()
     .enumerate()
     {
-        let wrong = app
-            .size_error
-            .as_ref()
-            .filter(|(at, _)| *at == side)
-            .map(|(_, why)| why.clone());
-        let mut units = div().flex().flex_row().flex_shrink_0();
-        for (index, unit) in size_units().into_iter().enumerate() {
-            let on = index == app.size_unit[side];
-            let unit_id = format!("filter-unit-{side}-{index}");
-            units = units.child(
-                button(
-                    ElementId::Name(unit_id.clone().into()),
-                    "",
-                    ButtonVariant::Outline,
+        let wrong = app.size_error.as_ref().is_some_and(|(at, _)| *at == side);
+        let mut editor = gpui_omarchy::input(
+            ElementId::Name(format!("{id}-input").into()),
+            input,
+            window,
+            cx,
+        )
+        // A set height, so the cross turning up does not move the row.
+        .h(size::TARGET)
+        .py(gpui_kit::rems(0.));
+        if !input.read(cx).value().is_empty() {
+            editor = editor.suffix(
+                gpui_omarchy::icon_button(
+                    ElementId::Name(format!("{id}-clear").into()),
+                    IconName::Close,
+                    format!("Clear the {}", label.to_lowercase()),
+                    ButtonVariant::Secondary,
                     cx,
                 )
-                .debug_selector(move || unit_id)
-                .accessibility_label(format!("{label} in {unit}"))
-                .selected(on)
-                .min_h(size::TARGET)
-                .justify_center()
-                .text_size(text::TITLE)
-                // The unit in force has a tick and weight, not a tint
-                // alone.
-                .when(on, |unit| {
-                    unit.border_color(theme.accent)
-                        .text_color(theme.bright)
-                        .font_weight(FontWeight::BOLD)
-                        .child(
-                            gpui_omarchy::icon(IconName::Check)
-                                .size(icon::SM),
-                        )
-                })
-                .child(unit)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_size_unit(side, index, cx);
-                })),
+                .debug_selector(move || format!("{id}-clear"))
+                .p(space::XS)
+                .on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.clear_size(side, window, cx);
+                    },
+                )),
             );
         }
         let field = div()
@@ -2114,19 +2102,30 @@ fn filter_control(
             // Always a border, so one that turns up for an error moves
             // nothing.
             .border_1()
-            .border_color(if wrong.is_some() {
+            .border_color(if wrong {
                 warning
             } else {
                 theme.foreground.opacity(0.)
             })
-            .child(gpui_omarchy::input(
-                ElementId::Name(format!("{id}-input").into()),
-                input,
-                window,
-                cx,
-            ));
+            .child(editor);
+        let unit = app.unit_selects.as_ref().map(|selects| {
+            div()
+                .debug_selector(move || format!("filter-unit-{side}"))
+                .w(size::UNIT_SELECT)
+                .flex_shrink_0()
+                .child(gpui_omarchy::select(
+                    ElementId::Name(
+                        format!("filter-unit-{side}-select").into(),
+                    ),
+                    &selects[side],
+                    window,
+                    cx,
+                ))
+        });
         sides = sides.child(
             div()
+                .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .gap(space::XS)
@@ -2154,29 +2153,35 @@ fn filter_control(
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(space::SM)
-                        .child(field)
-                        .child(units),
-                )
-                // An icon and a sentence, not a red edge alone.
-                .children(wrong.map(|why| {
-                    div()
-                        .debug_selector(|| "filter-size-error".into())
-                        .flex()
-                        .flex_row()
-                        .items_center()
                         .gap(space::XS)
-                        .text_size(text::BODY)
-                        .text_color(warning)
-                        .child(
-                            gpui_omarchy::icon(IconName::TriangleAlert)
-                                .size(icon::SM)
-                                .text_color(warning),
-                        )
-                        .child(why)
-                })),
+                        .child(field)
+                        .children(unit),
+                ),
         );
     }
+    // Under both, since the row is shared: the sentence names the field.
+    // An icon and words, not a red edge alone.
+    let sizes = div()
+        .flex()
+        .flex_col()
+        .gap(space::XS)
+        .child(sides)
+        .children(app.size_error.as_ref().map(|(_, why)| {
+            div()
+                .debug_selector(|| "filter-size-error".into())
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space::XS)
+                .text_size(text::BODY)
+                .text_color(warning)
+                .child(
+                    gpui_omarchy::icon(IconName::TriangleAlert)
+                        .size(icon::SM)
+                        .text_color(warning),
+                )
+                .child(why.clone())
+        }));
 
     let summary = div()
         .debug_selector(|| "filter-size-summary".into())
@@ -2245,7 +2250,7 @@ fn filter_control(
                     "Sizes apply to files, not folders",
                     theme,
                 ))
-                .child(sides)
+                .child(sizes)
                 .child(summary)
                 .child(actions)
                 .children(app.notice.as_ref().map(|(text, status)| {

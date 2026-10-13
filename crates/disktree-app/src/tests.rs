@@ -2236,8 +2236,8 @@ fn the_filter_menu_narrows_by_size_and_kind(cx: &mut TestAppContext) {
         least.update(cx, |field, cx| field.set_value("150", window, cx));
         most.update(cx, |field, cx| field.set_value("250", window, cx));
     });
-    click(cx, "filter-unit-0-0");
-    click(cx, "filter-unit-1-0");
+    update(&view, cx, |app, cx| app.set_size_unit(0, 0, cx));
+    update(&view, cx, |app, cx| app.set_size_unit(1, 0, cx));
     cx.run_until_parked();
     draw(cx);
     read(&view, cx, |app| {
@@ -2415,6 +2415,64 @@ fn each_size_has_its_own_unit(cx: &mut TestAppContext) {
             "Showing files of from 150 KiB to 1.0 MiB"
         );
     });
+}
+
+#[gpui_kit::test]
+fn a_size_has_a_dropdown_for_its_unit_and_a_cross_to_empty_it(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    cx.update(|window, cx| {
+        view.update(cx, |app, cx| app.toggle_filter_menu(window, cx));
+    });
+    draw(cx);
+    // Min and Max share a line: the Max field is beside the Min one.
+    let least = cx.debug_bounds("filter-least").expect("Min");
+    let most = cx.debug_bounds("filter-most").expect("Max");
+    assert_eq!(least.origin.y, most.origin.y);
+    assert!(most.origin.x > least.origin.x);
+    // An empty field has nothing to clear.
+    assert!(cx.debug_bounds("filter-least-clear").is_none());
+
+    press(cx, "1 5 0 enter");
+    draw(cx);
+    assert_eq!(read(&view, cx, |app| app.filter_least), Some(150 << 20));
+
+    // The unit is picked from a dropdown, and what is picked is read at
+    // once: the 150 typed now means KiB.
+    let selects =
+        read(&view, cx, |app| app.unit_selects.clone()).expect("dropdowns");
+    let unit = cx.debug_bounds("filter-unit-0").expect("the Min unit");
+    cx.simulate_click(unit.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    assert!(cx.update(|_, cx| selects[0].read(cx).is_open()));
+    assert!(cx.debug_bounds("omarchy-choice-popup").is_some());
+    // Escape there closes the dropdown, not the menu under it.
+    press(cx, "escape");
+    draw(cx);
+    assert!(read(&view, cx, |app| app.filter_menu));
+    cx.update(|_, cx| {
+        selects[0].update(cx, |select, cx| select.set_selected(Some(0), cx));
+    });
+    cx.run_until_parked();
+    draw(cx);
+    read(&view, cx, |app| {
+        assert_eq!(app.size_unit, [0, 1]);
+        assert_eq!(app.filter_least, Some(150 << 10));
+    });
+
+    // The cross in the field empties it and lifts that limit.
+    let clear = cx.debug_bounds("filter-least-clear").expect("the cross");
+    cx.simulate_click(clear.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    read(&view, cx, |app| {
+        assert_eq!(app.filter_least, None);
+        assert!(app.filter_menu);
+    });
+    assert!(cx.debug_bounds("filter-least-clear").is_none());
 }
 
 #[gpui_kit::test]

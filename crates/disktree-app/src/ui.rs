@@ -98,8 +98,10 @@ pub mod size {
     pub const TOOLTIP: Rems = Rems(16.75);
     /// The keyboard overlay.
     pub const HELP: Rems = Rems(32.5);
-    /// The Filter menu: a size field beside its three units.
-    pub const FILTER_MENU: Rems = Rems(23.0);
+    /// The Filter menu: Min and Max side by side, each a field and a unit.
+    pub const FILTER_MENU: Rems = Rems(28.0);
+    /// A size's unit, as a dropdown: `MiB` and the arrow that opens it.
+    pub const UNIT_SELECT: Rems = Rems(5.0);
     /// The least height of something to press in that menu: 32 px at the
     /// default rem, over the 24 px WCAG 2.2 asks of a pointer target.
     pub const TARGET: Rems = Rems(2.0);
