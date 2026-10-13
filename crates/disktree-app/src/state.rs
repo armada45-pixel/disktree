@@ -520,6 +520,10 @@ pub struct Disktree {
     /// least then the most: an index into [`size_units`]. Each has its
     /// own, so "from 500 MiB to 4 GiB" is typed as it is said.
     pub size_unit: [usize; 2],
+    /// What is wrong with a typed size and which field it is in, the
+    /// least (`0`) or the most (`1`): said beside that field, in words,
+    /// until it is put right.
+    pub size_error: Option<(usize, String)>,
     /// The machine being scanned over SSH, when it is not this one. While
     /// set, the tree's paths are that machine's, and nothing that acts on
     /// a local path is offered: see [`Self::set_remote`].
@@ -642,6 +646,7 @@ impl Disktree {
             filter_most: None,
             // Megabytes: the unit most "large files" are counted in.
             size_unit: [1, 1],
+            size_error: None,
             remote: None,
             ssh_input: None,
             size_inputs: None,
@@ -1108,6 +1113,40 @@ impl Disktree {
         words.join(" ")
     }
 
+    /// How many things the Filter menu asks for: each ticked kind, and
+    /// each size that is set.
+    pub fn filter_count(&self) -> usize {
+        self.filter_kinds.len()
+            + usize::from(self.filter_least.is_some())
+            + usize::from(self.filter_most.is_some())
+    }
+
+    /// The menu's choices read back as a sentence, so what is in force is
+    /// said in words and not only shown by ticks.
+    pub fn filter_sentence(&self) -> String {
+        use disktree_core::size::human_bytes;
+        let kinds = self
+            .filter_kinds
+            .iter()
+            .map(|kind| kind.label())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let sizes = match (self.filter_least, self.filter_most) {
+            (Some(least), Some(most)) => {
+                format!("from {} to {}", human_bytes(least), human_bytes(most))
+            }
+            (Some(least), None) => format!("{} or more", human_bytes(least)),
+            (None, Some(most)) => format!("{} or less", human_bytes(most)),
+            (None, None) => String::new(),
+        };
+        match (kinds.is_empty(), sizes.is_empty()) {
+            (true, true) => "Showing everything".into(),
+            (false, true) => format!("Showing {kinds}"),
+            (true, false) => format!("Showing files of {sizes}"),
+            (false, false) => format!("Showing {kinds}, {sizes}"),
+        }
+    }
+
     /// Whether the Filter menu asks for anything, whatever the name does.
     pub const fn filter_chosen(&self) -> bool {
         !self.filter_kinds.is_empty()
@@ -1129,8 +1168,12 @@ impl Disktree {
         let (least, most) = if let Some(inputs) = self.size_inputs.clone() {
             inputs
         } else {
-            let least = cx.new(|cx| InputState::new(window, cx));
-            let most = cx.new(|cx| InputState::new(window, cx));
+            // An empty field says what empty means, rather than nothing.
+            let field = |window: &mut Window, cx: &mut Context<'_, Self>| {
+                cx.new(|cx| InputState::new(window, cx).placeholder("No limit"))
+            };
+            let least = field(window, cx);
+            let most = field(window, cx);
             for input in [&least, &most] {
                 cx.subscribe_in(input, window, Self::on_size_event).detach();
             }
@@ -1139,13 +1182,17 @@ impl Disktree {
         };
         let units = self.size_unit;
         for (input, bytes, unit) in [
-            (least, self.filter_least, units[0]),
-            (most, self.filter_most, units[1]),
+            (&least, self.filter_least, units[0]),
+            (&most, self.filter_most, units[1]),
         ] {
             let shown =
                 bytes.map_or_else(String::new, |bytes| size_shown(bytes, unit));
             input.update(cx, |state, cx| state.set_value(shown, window, cx));
         }
+        // The keyboard starts inside the menu, so Tab and Shift+Tab walk
+        // its controls; from the treemap they would not reach it.
+        least.update(cx, |state, cx| state.focus(window, cx));
+        self.size_error = None;
         self.filter_menu = true;
         self.crumb_menu = None;
         self.power_menu = None;
@@ -1187,22 +1234,6 @@ impl Disktree {
         self.apply_sizes(cx);
     }
 
-    /// The sizes in force in words, each named for the side it bounds:
-    /// `min 500 MiB · max 4.0 GiB`. `None` when neither is set.
-    pub fn size_summary(&self) -> Option<String> {
-        use disktree_core::size::human_bytes;
-        let parts: Vec<String> = [
-            self.filter_least
-                .map(|least| format!("min {}", human_bytes(least))),
-            self.filter_most
-                .map(|most| format!("max {}", human_bytes(most))),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        (!parts.is_empty()).then(|| parts.join(" \u{00b7} "))
-    }
-
     /// Take the least and most sizes from the menu's fields. An empty
     /// field is no limit on that side.
     pub fn apply_sizes(&mut self, cx: &mut Context<'_, Self>) {
@@ -1213,24 +1244,32 @@ impl Disktree {
             size_typed(&input.read(cx).value(), unit)
         };
         let units = self.size_unit;
+        // Each failure names its field and the way out of it, and is
+        // shown beside that field: see `views::filter_control`.
+        let not_a_number = |side: &str| {
+            format!("{side} is not a number. Type one such as 1.5.")
+        };
         match (typed(&least, units[0]), typed(&most, units[1])) {
+            (Err(()), _) => {
+                self.size_error = Some((0, not_a_number("Min")));
+            }
+            (_, Err(())) => {
+                self.size_error = Some((1, not_a_number("Max")));
+            }
             (Ok(Some(least)), Ok(Some(most))) if least > most => {
-                self.notice = Some((
-                    "the min size is more than the max".into(),
-                    Status::Warning,
+                self.size_error = Some((
+                    1,
+                    format!(
+                        "Max is below Min. Raise Max above {}.",
+                        disktree_core::size::human_bytes(least)
+                    ),
                 ));
             }
             (Ok(least), Ok(most)) => {
                 self.filter_least = least;
                 self.filter_most = most;
-                self.notice = None;
+                self.size_error = None;
                 self.rerun_filter(cx);
-            }
-            _ => {
-                self.notice = Some((
-                    "a size is a number, such as 1.5".into(),
-                    Status::Warning,
-                ));
             }
         }
         cx.notify();
@@ -1250,7 +1289,7 @@ impl Disktree {
             least.update(cx, |state, cx| state.set_value("", window, cx));
             most.update(cx, |state, cx| state.set_value("", window, cx));
         }
-        self.notice = None;
+        self.size_error = None;
         self.rerun_filter(cx);
     }
 

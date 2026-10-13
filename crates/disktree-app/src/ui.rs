@@ -98,12 +98,11 @@ pub mod size {
     pub const TOOLTIP: Rems = Rems(16.75);
     /// The keyboard overlay.
     pub const HELP: Rems = Rems(32.5);
-    /// The Filter menu: two size fields and a word between them.
-    pub const FILTER_MENU: Rems = Rems(22.0);
-    /// The word before one of them: Min or Max.
-    pub const SIDE_LABEL: Rems = Rems(2.25);
-    /// One of those fields: room for a number such as `1024.5`.
-    pub const SIZE_FIELD: Rems = Rems(6.0);
+    /// The Filter menu: a size field beside its three units.
+    pub const FILTER_MENU: Rems = Rems(23.0);
+    /// The least height of something to press in that menu: 32 px at the
+    /// default rem, over the 24 px WCAG 2.2 asks of a pointer target.
+    pub const TARGET: Rems = Rems(2.0);
     /// The page of disks: three cards across at the default rem.
     pub const HOME: Rems = Rems(58.0);
     /// One disk on that page: wide enough for a label and its letter.

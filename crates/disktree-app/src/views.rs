@@ -1803,7 +1803,7 @@ fn power_efficiency(app: &Disktree, cx: &Context<'_, Disktree>) -> Div {
 fn trail_and_legend(
     app: &Disktree,
     theme: &Theme,
-    window: &mut Window,
+    window: &Window,
     cx: &mut Context<'_, Disktree>,
 ) -> Div {
     let mut row = div()
@@ -1847,37 +1847,77 @@ fn segment(
         .child(label)
 }
 
-/// What the Filter menu asks for, for beside its button: how many kinds are
-/// ticked, and the sizes with which is the min and which the max.
-fn filter_summary(app: &Disktree) -> Option<String> {
-    let kinds = match app.filter_kinds.as_slice() {
-        [] => None,
-        [only] => Some(only.label().to_string()),
-        several => Some(format!("{} kinds", several.len())),
-    };
-    let parts: Vec<String> =
-        kinds.into_iter().chain(app.size_summary()).collect();
-    (!parts.is_empty()).then(|| parts.join(" \u{00b7} "))
+/// How many things the Filter menu asks for, in words: read in its
+/// heading, and on its button while the menu is shut.
+fn filter_status(app: &Disktree) -> String {
+    match app.filter_count() {
+        0 => "No filter on".into(),
+        1 => "1 filter on".into(),
+        many => format!("{many} filters on"),
+    }
+}
+
+/// A section of the Filter menu: what it is, then what it does, in words
+/// at reading size rather than as a small capital label.
+fn menu_heading(title: &'static str, hint: &'static str, theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(space::XXS)
+        .child(
+            div()
+                .text_size(text::TITLE)
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme.bright)
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(text::BODY)
+                .text_color(theme.secondary)
+                .child(hint),
+        )
 }
 
 /// Two ways to narrow the mosaic, each its own button. **Filter** is what
 /// can be picked: kinds of data, any number of them, and a least and a
 /// most size for files. **Name** is what has to be typed, and opens the
 /// field `/` opens. They combine, and neither shows the other's words.
+///
+/// The menu is laid out to the four POUR principles. Perceivable: nothing
+/// is smaller than body text, and a state is never colour alone — a tick,
+/// a weight, an icon or a word goes with it. Operable: every control is a
+/// tab stop at least [`size::TARGET`] tall, and Tab walks them. To be
+/// understood: each field is labelled above, an empty one says "No limit",
+/// the filter is read back as a sentence, and an error sits by its field
+/// and says the way out. Robust: the controls are the toolkit's own, so
+/// each carries a role, a name and a state.
 fn filter_control(
     app: &Disktree,
     theme: &Theme,
-    window: &mut Window,
+    window: &Window,
     cx: &mut Context<'_, Disktree>,
 ) -> Div {
     use crate::state::size_units;
+    use gpui_omarchy::{IconName, Status};
 
     let highlight = palette::highlight(theme);
     let chosen = app.filter_chosen();
     let toggle =
         button("filter-button", "Filter", ButtonVariant::Secondary, cx)
             .tab_stop(false)
-            .when(chosen, |toggle| toggle.border_color(highlight))
+            .when(chosen, |toggle| {
+                // The count is there to read with the menu shut.
+                toggle.border_color(highlight).child(
+                    div()
+                        .debug_selector(|| "filter-summary".into())
+                        .px(space::XS)
+                        .bg(highlight.opacity(0.2))
+                        .text_color(theme.bright)
+                        .font_weight(FontWeight::BOLD)
+                        .child(format!("{} on", app.filter_count())),
+                )
+            })
             .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_filter_menu(window, cx);
                 this.apply_focus(window, cx);
@@ -1905,15 +1945,6 @@ fn filter_control(
             .gap(space::SM)
             .flex_shrink_0()
             .child(holder)
-            .children(filter_summary(app).map(|summary| {
-                div()
-                    .id("filter-summary")
-                    .debug_selector(|| "filter-summary".into())
-                    .text_size(text::CAPTION)
-                    .text_color(highlight)
-                    .whitespace_nowrap()
-                    .child(summary)
-            }))
             .child(
                 div()
                     .id("filter-name-holder")
@@ -1927,188 +1958,303 @@ fn filter_control(
         return buttons(holder);
     };
 
-    let mut menu = card_surface(cx)
-        .id("filter-menu")
-        .debug_selector(|| "filter-menu".into())
-        .occlude()
-        .w(size::FILTER_MENU)
-        .child(widgets::eyebrow("Kind \u{00b7} any ticked", cx));
+    let header = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(space::SM)
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap(space::XXS)
+                .child(
+                    div()
+                        .text_size(text::TITLE)
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme.bright)
+                        .child("Filter"),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "filter-status".into())
+                        .text_size(text::BODY)
+                        .text_color(theme.secondary)
+                        .child(filter_status(app)),
+                ),
+        )
+        .child(
+            gpui_omarchy::icon_button(
+                "filter-done",
+                IconName::Close,
+                "Close the Filter menu",
+                ButtonVariant::Outline,
+                cx,
+            )
+            .debug_selector(|| "filter-done".into())
+            .size(size::TARGET)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.close_filter_menu(cx);
+                this.apply_focus(window, cx);
+            })),
+        );
+
+    let entity = cx.entity().downgrade();
+    let mut kinds = div().flex().flex_col().child(
+        menu_heading("Kind", "Show files of any ticked kind", theme)
+            .pb(space::XS),
+    );
     for category in Category::LEGEND {
         let on = app.filter_kinds.contains(&category);
         let id = format!(
             "filter-kind-{}",
             disktree_core::filter::kind_key(category)
         );
-        menu = menu.child(
+        let entity = entity.clone();
+        kinds = kinds.child(
             div()
-                .id(ElementId::Name(id.clone().into()))
-                .debug_selector(move || id)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(space::SM)
-                .px(space::SM)
-                .py(space::XS)
-                .text_size(text::BODY)
-                .text_color(if on { theme.bright } else { theme.foreground })
-                .hover(|row| row.bg(theme.hover_fill()))
-                .cursor_pointer()
-                // A box that is ticked or not, since any number can be.
+                .debug_selector({
+                    let id = id.clone();
+                    move || id
+                })
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(space::LG)
-                        .border_1()
-                        .border_color(if on {
-                            theme.accent
+                    // The toolkit's tick box: a checkbox by role, named
+                    // for its kind, focusable, and ticked with Space. The
+                    // whole row is the target, not the box alone.
+                    checkbox(
+                        ElementId::Name(id.into()),
+                        "",
+                        if on {
+                            CheckboxState::Checked
                         } else {
-                            theme.control_border()
-                        })
-                        .when(on, |tick| {
-                            tick.bg(theme.accent.opacity(0.25)).child(
-                                gpui_omarchy::icon(
-                                    gpui_omarchy::IconName::Check,
-                                )
-                                .size(icon::SM),
-                            )
-                        }),
-                )
-                .child(widgets::swatch(palette::category_accent(
-                    theme, category,
-                )))
-                .child(div().flex_1().child(category.label()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_filter_kind(category, cx);
-                })),
+                            CheckboxState::Unchecked
+                        },
+                        cx,
+                    )
+                    .accessibility_label(category.label())
+                    .w_full()
+                    .min_h(size::TARGET)
+                    .text_size(text::TITLE)
+                    // Ticked is said by the tick and by weight; the
+                    // swatch only echoes the legend.
+                    .when(on, |row| {
+                        row.font_weight(FontWeight::BOLD)
+                            .text_color(theme.bright)
+                    })
+                    .child(widgets::swatch(palette::category_accent(
+                        theme, category,
+                    )))
+                    .child(category.label())
+                    .on_change(move |_, _, _, cx| {
+                        let _ = entity.update(cx, |this, cx| {
+                            this.toggle_filter_kind(category, cx);
+                        });
+                    }),
+                ),
         );
     }
 
-    let field =
-        |id: &'static str,
-         input: &gpui_kit::Entity<gpui_kit::base::input::InputState>,
-         window: &mut Window,
-         cx: &mut Context<'_, Disktree>| {
-            div()
-                .id(id)
-                .debug_selector(move || id.into())
-                .w(size::SIZE_FIELD)
-                .child(gpui_omarchy::input(
-                    ElementId::Name(format!("{id}-input").into()),
-                    input,
-                    window,
-                    cx,
-                ))
-        };
-    // One row for each side, named, with the unit it is read in: "from
-    // 500 MiB to 4 GiB" is typed the way it is said.
-    let mut sides = div().flex().flex_col().gap(space::SM);
-    for (side, (label, id, input)) in [
-        ("Min", "filter-least", &least),
-        ("Max", "filter-most", &most),
+    let warning = widgets::alert_color(Status::Warning, cx);
+    // One block for each side: its name and what it bounds above the
+    // field, then the field beside the unit it is read in, so "from 500
+    // MiB to 4 GiB" is typed the way it is said.
+    let mut sides = div().flex().flex_col().gap(space::MD);
+    for (side, (label, hint, id, input)) in [
+        ("Min size", "at least", "filter-least", &least),
+        ("Max size", "at most", "filter-most", &most),
     ]
     .into_iter()
     .enumerate()
     {
-        let mut units = div().flex().flex_row().gap(space::XS);
+        let wrong = app
+            .size_error
+            .as_ref()
+            .filter(|(at, _)| *at == side)
+            .map(|(_, why)| why.clone());
+        let mut units = div().flex().flex_row().flex_shrink_0();
         for (index, unit) in size_units().into_iter().enumerate() {
+            let on = index == app.size_unit[side];
+            let unit_id = format!("filter-unit-{side}-{index}");
             units = units.child(
-                segment(
-                    format!("filter-unit-{side}-{index}"),
-                    unit,
-                    index == app.size_unit[side],
-                    theme,
+                button(
+                    ElementId::Name(unit_id.clone().into()),
+                    "",
+                    ButtonVariant::Outline,
+                    cx,
                 )
-                .on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        this.set_size_unit(side, index, cx);
-                    },
-                )),
+                .debug_selector(move || unit_id)
+                .accessibility_label(format!("{label} in {unit}"))
+                .selected(on)
+                .min_h(size::TARGET)
+                .justify_center()
+                .text_size(text::TITLE)
+                // The unit in force has a tick and weight, not a tint
+                // alone.
+                .when(on, |unit| {
+                    unit.border_color(theme.accent)
+                        .text_color(theme.bright)
+                        .font_weight(FontWeight::BOLD)
+                        .child(
+                            gpui_omarchy::icon(IconName::Check)
+                                .size(icon::SM),
+                        )
+                })
+                .child(unit)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_size_unit(side, index, cx);
+                })),
             );
         }
+        let field = div()
+            .id(id)
+            .debug_selector(move || id.into())
+            .flex_1()
+            .min_w_0()
+            // Always a border, so one that turns up for an error moves
+            // nothing.
+            .border_1()
+            .border_color(if wrong.is_some() {
+                warning
+            } else {
+                theme.foreground.opacity(0.)
+            })
+            .child(gpui_omarchy::input(
+                ElementId::Name(format!("{id}-input").into()),
+                input,
+                window,
+                cx,
+            ));
         sides = sides.child(
             div()
                 .flex()
-                .flex_row()
-                .items_center()
-                .gap(space::SM)
+                .flex_col()
+                .gap(space::XS)
                 .child(
                     div()
-                        .w(size::SIDE_LABEL)
-                        .flex_shrink_0()
-                        .text_size(text::BODY)
-                        .text_color(theme.bright)
-                        .child(label),
-                )
-                .child(field(id, input, window, cx))
-                .child(units),
-        );
-    }
-    let menu = menu
-        .child(widgets::eyebrow("File size", cx).pt(space::SM))
-        .child(sides)
-        .child(div().text_color(theme.secondary.opacity(0.8)).child(
-            "Min is the smallest file shown, Max the largest. Empty is no \
-             limit. Enter applies.",
-        ))
-        .children(app.size_summary().map(|summary| {
-            div()
-                .id("filter-size-summary")
-                .debug_selector(|| "filter-size-summary".into())
-                .text_color(highlight)
-                .child(format!("Showing files: {summary}"))
-        }))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .gap(space::SM)
-                .pt(space::XS)
-                .child(
-                    button("filter-apply", "Apply", ButtonVariant::Outline, cx)
-                        .tab_stop(false)
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.apply_sizes(cx)),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(
+                            div()
+                                .text_size(text::TITLE)
+                                .text_color(theme.bright)
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .text_size(text::BODY)
+                                .text_color(theme.secondary)
+                                .child(hint),
                         ),
                 )
                 .child(
-                    button(
-                        "filter-clear",
-                        "Clear",
-                        ButtonVariant::Secondary,
-                        cx,
-                    )
-                    .tab_stop(false)
-                    .disabled(!chosen)
-                    .on_click(cx.listener(
-                        |this, _, window, cx| {
-                            this.clear_chosen_filter(window, cx);
-                        },
-                    )),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(field)
+                        .child(units),
                 )
-                .child(div().flex_1())
-                .child(
-                    button(
-                        "filter-done",
-                        "Close",
-                        ButtonVariant::Secondary,
-                        cx,
-                    )
-                    .tab_stop(false)
-                    .on_click(cx.listener(
-                        |this, _, window, cx| {
-                            this.close_filter_menu(cx);
-                            this.apply_focus(window, cx);
-                        },
-                    )),
-                ),
-        )
-        .children(app.notice.as_ref().map(|(text, status)| {
+                // An icon and a sentence, not a red edge alone.
+                .children(wrong.map(|why| {
+                    div()
+                        .debug_selector(|| "filter-size-error".into())
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(space::XS)
+                        .text_size(text::BODY)
+                        .text_color(warning)
+                        .child(
+                            gpui_omarchy::icon(IconName::TriangleAlert)
+                                .size(icon::SM)
+                                .text_color(warning),
+                        )
+                        .child(why)
+                })),
+        );
+    }
+
+    let summary = div()
+        .debug_selector(|| "filter-size-summary".into())
+        .px(space::SM)
+        .py(space::XS)
+        .bg(theme.hover_fill())
+        .text_size(text::BODY)
+        .text_color(theme.foreground)
+        .child(if app.size_error.is_some() {
+            "Not applied yet: put the size right first".to_owned()
+        } else {
+            app.filter_sentence()
+        });
+    let actions = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(space::SM)
+        // Only when there is something to clear, rather than greyed out.
+        .children(chosen.then(|| {
+            button("filter-clear", "Clear all", ButtonVariant::Outline, cx)
+                .debug_selector(|| "filter-clear".into())
+                .min_h(size::TARGET)
+                .text_size(text::TITLE)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.clear_chosen_filter(window, cx);
+                }))
+        }))
+        .child(div().flex_1())
+        .child(
             div()
-                .text_color(widgets::alert_color(*status, cx))
-                .child(text.clone())
-        }));
+                .text_size(text::BODY)
+                .text_color(theme.secondary)
+                .child("Esc closes"),
+        )
+        .child(
+            // Never disabled: a bad size is answered beside its field.
+            button("filter-apply", "Apply", ButtonVariant::Primary, cx)
+                .debug_selector(|| "filter-apply".into())
+                .min_h(size::TARGET)
+                .text_size(text::TITLE)
+                .font_weight(FontWeight::BOLD)
+                .child(
+                    div()
+                        .text_size(text::BODY)
+                        .font_weight(FontWeight::NORMAL)
+                        .child("Enter"),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.apply_sizes(cx))),
+        );
+
+    // A focus scope, so Tab and Shift+Tab walk the menu's controls.
+    let menu = gpui_omarchy::focus_scope("filter-menu")
+        .debug_selector(|| "filter-menu".into())
+        .occlude()
+        .child(
+            card_surface(cx)
+                .w(size::FILTER_MENU)
+                .p(space::MD)
+                .gap(space::MD)
+                .child(header)
+                .child(kinds)
+                .child(separator(cx))
+                .child(menu_heading(
+                    "File size",
+                    "Sizes apply to files, not folders",
+                    theme,
+                ))
+                .child(sides)
+                .child(summary)
+                .child(actions)
+                .children(app.notice.as_ref().map(|(text, status)| {
+                    div()
+                        .text_size(text::BODY)
+                        .text_color(widgets::alert_color(*status, cx))
+                        .child(text.clone())
+                })),
+        );
     // Hung below the button and deferred, so it paints over the mosaic.
     buttons(
         holder.child(
