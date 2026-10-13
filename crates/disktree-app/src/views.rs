@@ -2075,7 +2075,7 @@ fn filter_control(
         )
         // A set height, so the cross turning up does not move the row.
         .h(size::TARGET)
-        .py(gpui_kit::rems(0.));
+        .py(space::NONE);
         if !input.read(cx).value().is_empty() {
             editor = editor.suffix(
                 gpui_omarchy::icon_button(

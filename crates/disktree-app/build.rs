@@ -89,7 +89,13 @@ fn build_number() {
             |(count, commit)| format!("{count}.{commit}"),
         );
     println!("cargo:rustc-env=DISKTREE_BUILD={build}");
-    // Every commit, checkout and merge appends here, so the number is
-    // never left over from an older one.
-    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
+    // Every commit, checkout and merge appends to this log, so the number
+    // is never left over from an older one. git is asked where it is: in
+    // a worktree it is not under `.git` here. Only a log that exists is
+    // named, since cargo takes a missing one as changed on every build.
+    if let Some(log) = git(&["rev-parse", "--git-path", "logs/HEAD"])
+        .filter(|log| std::path::Path::new(log).exists())
+    {
+        println!("cargo:rerun-if-changed={log}");
+    }
 }

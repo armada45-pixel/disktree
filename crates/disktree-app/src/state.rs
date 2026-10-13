@@ -113,11 +113,12 @@ const INSIGHT_MORE: usize = 30;
 
 /// The units a size can be typed in, in the Filter menu: each a step of
 /// the one before, in whichever of GiB and GB sizes are being shown in.
-pub fn size_units() -> [&'static str; 3] {
+/// Up to the terabyte: a disk image or a backup set is a file that big.
+pub fn size_units() -> [&'static str; 4] {
     if disktree_core::size::decimal_units() {
-        ["kB", "MB", "GB"]
+        ["kB", "MB", "GB", "TB"]
     } else {
-        ["KiB", "MiB", "GiB"]
+        ["KiB", "MiB", "GiB", "TiB"]
     }
 }
 
@@ -1129,6 +1130,11 @@ impl Disktree {
     /// said in words and not only shown by ticks.
     pub fn filter_sentence(&self) -> String {
         use disktree_core::size::human_bytes;
+        // Nothing is hidden when nothing matched: see `apply_filter`.
+        let none = self.matches.as_ref().is_some_and(|found| found.count == 0);
+        if self.filter_chosen() && none && !self.finding {
+            return "Nothing here matches, so everything is shown".into();
+        }
         let kinds = self
             .filter_kinds
             .iter()
@@ -1221,6 +1227,12 @@ impl Disktree {
             (&least, self.filter_least, units[0]),
             (&most, self.filter_most, units[1]),
         ] {
+            // What was typed stays as typed while it still means the
+            // size in force: written back from the bytes it would be
+            // rounded, and the next Apply would move the limit.
+            if size_typed(&input.read(cx).value(), unit) == Ok(bytes) {
+                continue;
+            }
             let shown =
                 bytes.map_or_else(String::new, |bytes| size_shown(bytes, unit));
             input.update(cx, |state, cx| state.set_value(shown, window, cx));
@@ -3682,6 +3694,13 @@ impl Disktree {
         // tree, and Escape always means "give the keyboard back".
         if self.screen == Screen::Explore && self.find_open {
             match key {
+                // The name alone: what the Filter menu holds was not
+                // typed here, and its own Clear leaves the name in turn.
+                "escape" if self.filter_chosen() => {
+                    self.find.clear();
+                    self.find_open = false;
+                    self.rerun_filter(cx);
+                }
                 "escape" => self.clear_filter(),
                 "enter" => self.apply_filter(cx),
                 "backspace" => {
