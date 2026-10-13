@@ -150,8 +150,12 @@ disktree --help     # options: apparent size, follow links, skip hidden, …
 - **Under it:** the scan totals, **Filter** and **Name**, and the legend.
   Filter narrows the mosaic to the kinds of data that are ticked, any number
   of them, and to files between a **Min** and a **Max** size, each typed
-  with its own unit. What is in force is said beside the button. Name is
-  the filter `/` opens. The two combine. The settings page also chooses
+  with its own unit, up to the terabyte, and emptied by the cross in its
+  field. The button counts what is in force and the menu reads it back as
+  a sentence. The menu works from the keyboard: Tab and Shift+Tab walk it,
+  Space ticks, Enter applies, Esc closes. Name is the filter `/` opens,
+  and Esc there drops the name alone. The two combine. The settings page
+  also chooses
   whether sizes read in GiB (1024s) or GB (1000s), and says which version
   and build this is.
 - **Mosaic:** colour is the *kind* of data — code, agent scratch,
