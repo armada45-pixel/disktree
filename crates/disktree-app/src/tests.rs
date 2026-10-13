@@ -2490,6 +2490,68 @@ fn a_size_has_a_dropdown_for_its_unit_and_a_cross_to_empty_it(
 }
 
 #[gpui_kit::test]
+fn the_name_and_the_menu_are_cleared_apart_and_a_miss_is_said(
+    cx: &mut TestAppContext,
+) {
+    use disktree_core::classify::Category;
+
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    cx.update(|window, cx| {
+        view.update(cx, |app, cx| app.toggle_filter_menu(window, cx));
+    });
+    draw(cx);
+    // A size typed with more digits than it is shown with.
+    let (least, _) =
+        read(&view, cx, |app| app.size_inputs.clone()).expect("the fields");
+    cx.update(|window, cx| {
+        least.update(cx, |field, cx| field.set_value("0.1234", window, cx));
+    });
+    update(&view, cx, Disktree::apply_sizes);
+    let typed = read(&view, cx, |app| app.filter_least);
+    press(cx, "escape");
+    cx.update(|window, cx| {
+        view.update(cx, |app, cx| app.toggle_filter_menu(window, cx));
+    });
+    draw(cx);
+    // Reopened, it reads as it was typed, and Apply moves nothing.
+    assert_eq!(
+        cx.update(|_, cx| least.read(cx).value().to_string()),
+        "0.1234"
+    );
+    update(&view, cx, Disktree::apply_sizes);
+    assert_eq!(read(&view, cx, |app| app.filter_least), typed);
+    press(cx, "escape");
+
+    // Escape in the name field drops the name and leaves the menu's.
+    press(cx, "/");
+    press(cx, "b l o b");
+    press(cx, "escape");
+    cx.run_until_parked();
+    read(&view, cx, |app| {
+        assert!(app.find.is_empty());
+        assert!(!app.find_open);
+        assert_eq!(app.filter_least, typed);
+    });
+
+    // A kind nothing here is: said, since nothing is then hidden.
+    update(&view, cx, |app, cx| {
+        app.filter_least = None;
+        app.toggle_filter_kind(Category::Git, cx);
+    });
+    cx.run_until_parked();
+    read(&view, cx, |app| {
+        assert_eq!(app.matches.as_ref().map(|found| found.count), Some(0));
+        assert_eq!(
+            app.filter_sentence(),
+            "Nothing here matches, so everything is shown"
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn the_filter_menu_is_walked_and_worked_by_keyboard(cx: &mut TestAppContext) {
     use disktree_core::classify::Category;
 

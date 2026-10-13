@@ -21,6 +21,8 @@ use gpui_kit::Rems;
 pub mod space {
     use super::Rems;
 
+    /// None at all: a control whose height is set, not padded out.
+    pub const NONE: Rems = Rems(0.0);
     /// Optical correction: an icon baseline, a compact separator.
     pub const XXS: Rems = Rems(0.125);
     /// Parts of one control: icon and label, title and its description.

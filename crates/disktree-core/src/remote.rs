@@ -108,8 +108,11 @@ fn quoted(text: &str) -> String {
 /// since a name may hold a newline: type, 512-byte blocks, length, last
 /// write, and the path below the start.
 fn listing_command(path: &str, options: &ScanOptions) -> String {
+    // The slash after the path has `find` enter a start that is a link
+    // to a directory, as `/bin` and many a `/var/www` are; without it
+    // the link alone is listed and there is no tree.
     format!(
-        "LC_ALL=C find {} {}-printf '%y\\t%b\\t%s\\t%T@\\t%P\\0'",
+        "LC_ALL=C find {}/ {}-printf '%y\\t%b\\t%s\\t%T@\\t%P\\0'",
         quoted(path),
         if options.one_filesystem { "-xdev " } else { "" },
     )
@@ -169,7 +172,11 @@ pub(crate) fn scan(
         progress
             .record_error(Path::new(&remote.target), &io::Error::other(line));
     }
-    match tree? {
+    let tree = tree?;
+    if let Some(error) = cut_short(status.code(), &said) {
+        return Err(error);
+    }
+    match tree {
         Some(tree) => Ok(tree),
         // Nothing listed at all: `ssh` or `find` said why.
         None => Err(io::Error::other(
@@ -181,6 +188,26 @@ pub(crate) fn scan(
                 ),
         )),
     }
+}
+
+/// Why a listing that ended is not the whole of it, when it is not. `ssh`
+/// ends with 255 for a failure of its own — a connection refused, or one
+/// that dropped half way — and with the remote command's status
+/// otherwise; `find` ends with 1 for a directory it may not enter, which
+/// is an ordinary scan. Half a tree must not pass for a whole one: its
+/// totals would be believed.
+fn cut_short(status: Option<i32>, said: &str) -> Option<io::Error> {
+    (status == Some(255)).then(|| {
+        io::Error::other(
+            said.lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with("find:"))
+                .map_or_else(
+                    || "the ssh connection ended before the listing did".into(),
+                    str::to_owned,
+                ),
+        )
+    })
 }
 
 /// Build the tree from a listing. `find` names a directory before what is
@@ -320,6 +347,23 @@ mod tests {
     use super::*;
     use crate::tree::{Metric, aggregate};
 
+    #[test]
+    fn a_listing_ssh_did_not_finish_is_not_a_tree() {
+        // `find` could not enter a directory: an ordinary scan.
+        assert!(
+            cut_short(Some(1), "find: '/root': Permission denied").is_none()
+        );
+        assert!(cut_short(Some(0), "").is_none());
+        // `ssh` itself failed, before the listing or part way through it.
+        let dropped = cut_short(
+            Some(255),
+            "find: '/root': Permission denied\nConnection to host closed.\n",
+        )
+        .expect("an error");
+        assert_eq!(dropped.to_string(), "Connection to host closed.");
+        assert!(cut_short(Some(255), "").is_some());
+    }
+
     fn listing(records: &[&str]) -> Vec<u8> {
         records
             .iter()
@@ -381,7 +425,7 @@ mod tests {
         let command =
             listing_command("/srv/it's; rm -rf ~", &ScanOptions::default());
         assert!(
-            command.contains("find '/srv/it'\\''s; rm -rf ~' -xdev -printf"),
+            command.contains("find '/srv/it'\\''s; rm -rf ~'/ -xdev -printf"),
             "{command}"
         );
     }
