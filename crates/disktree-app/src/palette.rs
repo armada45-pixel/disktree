@@ -130,12 +130,16 @@ pub const fn highlight(theme: &Theme) -> Hsla {
     theme.warning
 }
 
-/// Text on a filled highlight.
-pub const fn on_highlight(theme: &Theme) -> Hsla {
-    if dark(theme) {
-        theme.background
+/// Text on a filled highlight: whichever end of the theme stands further
+/// from the fill. A light theme's highlight is a dark amber, and the dark
+/// text that suits its pages was nearly lost on it.
+pub fn on_highlight(theme: &Theme) -> Hsla {
+    let fill = highlight(theme).l;
+    let (ground, ink) = (theme.background, theme.bright);
+    if (ground.l - fill).abs() >= (ink.l - fill).abs() {
+        ground
     } else {
-        theme.bright
+        ink
     }
 }
 
