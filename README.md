@@ -137,7 +137,9 @@ disktree --help     # options: apparent size, follow links, skip hidden, …
 
 - **Top:** the trail from `/`, then what is measured — **Size**, **Files** or
   **Age**, **Hidden files**, **Apparent size**, and the depth drawn; at the
-  end, the theme (the system's, light or dark) and the way to GitHub. Click
+  end, the settings (theme, deeper levels, and on Windows a shortcut on the
+  Start menu or the desktop) and the way to GitHub. The disk button beside
+  the name opens a page of every disk, with its name, size and room. Click
   the empty space beside the trail, or press `ctrl l`, and the trail becomes
   a text field holding the path: copy it, or type or paste another and press
   Enter to go there. In the
@@ -145,7 +147,10 @@ disktree --help     # options: apparent size, follow links, skip hidden, …
   their share and size, to jump sideways (arrows and Enter work too). Above
   the scanned root a crumb is dimmer, and clicking it widens the scan to
   there (see below).
-- **Under it:** the scan totals, the filter when one is typed, and the legend.
+- **Under it:** the scan totals, **Filter**, the filter when one is set, and
+  the legend. Filter narrows the mosaic by name, by kind of data, or to
+  files of at least a size; the same can be typed after `/` as `kind:cache`
+  or `>1g`, alone or beside a name.
 - **Mosaic:** colour is the *kind* of data — code, agent scratch,
   toolchains, synced files, git, media, documents, caches — at one muted
   level, lighter with depth. A diagonal hatch is space that can be had back
@@ -244,7 +249,12 @@ rescan, ⌘[ and ⌘] for back and forward, and ⌘Q, ⌘H and ⌘W (closing the
 window quits); other ⌘ chords are left to the system. On Linux and Windows
 the same work with ctrl, with F5 to rescan too.
 
-Every hint in the bar along the bottom is also a button for its key.
+Every hint in the bar along the bottom is also a button for its key. The
+key list, the settings and the page of disks close with `esc`, their Close
+button, or a click outside them.
+
+The depth stops at 6 levels unless the settings allow 10: deeper draws many
+more tiles, most too small to read, and is slow on a whole disk.
 
 The theme, the depth, Size / Files / Age, hidden files, apparent size and
 the panel's width are remembered between launches, in `disktree/settings`

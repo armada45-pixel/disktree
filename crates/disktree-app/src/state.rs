@@ -29,7 +29,7 @@ use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::{
     AppContext as _, Context, Entity, FocusHandle, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, NavigationDirection, Pixels, Point, Render,
-    ScrollDelta, ScrollWheelEvent, Size, Window, px, size,
+    ScrollDelta, ScrollHandle, ScrollWheelEvent, Size, Window, px, size,
 };
 use gpui_omarchy::Status;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -106,8 +106,16 @@ pub fn panel_width(pointer_x: f32, viewport: f32, rem: f32) -> f32 {
 /// there.
 pub const REPOSITORY: &str = "https://github.com/tobi/disktree";
 
-/// How many "worth a look" findings the panel lists.
-const INSIGHT_LIMIT: usize = 6;
+/// How many "worth a look" findings the panel lists, and how many once
+/// "Show more" is asked for: the rest of what the scan found plausible.
+pub const INSIGHT_LIMIT: usize = 6;
+const INSIGHT_MORE: usize = 30;
+
+/// How many levels can be drawn at once. Past six a whole disk is tens of
+/// thousands of tiles too small to read and slow to lay out, so the levels
+/// beyond are there only for whoever asks for them in the settings.
+pub const USUAL_LEVELS: u32 = 6;
+pub const DEEP_LEVELS: u32 = 10;
 
 /// Which screen the app is showing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -470,6 +478,19 @@ pub struct Disktree {
     pub path_input: Option<Entity<InputState>>,
     /// The trail is a text field just now: see [`Self::open_path_bar`].
     pub path_open: bool,
+    /// Whether [`DEEP_LEVELS`] may be drawn, rather than [`USUAL_LEVELS`].
+    pub deep_levels: bool,
+    /// The settings page is over the window.
+    pub settings_open: bool,
+    /// The page of every disk is over the window; it shares the picker's
+    /// list and highlight.
+    pub home_open: bool,
+    /// The Filter button's menu is open.
+    pub filter_menu: bool,
+    /// "Worth a look" lists [`INSIGHT_MORE`] findings instead of the few.
+    pub insights_all: bool,
+    /// Where the panel's lists are scrolled to, shared with their bar.
+    pub panel_scroll: ScrollHandle,
 }
 
 impl Disktree {
@@ -506,7 +527,7 @@ impl Disktree {
             view: View::default(),
             transition: None,
             layout_options: LayoutOptions {
-                max_depth: depth.clamp(1, 6),
+                max_depth: depth.clamp(1, DEEP_LEVELS),
                 ..LayoutOptions::default()
             },
             cache: None,
@@ -570,6 +591,12 @@ impl Disktree {
             theme_choice: ThemeChoice::default(),
             path_input: None,
             path_open: false,
+            deep_levels: false,
+            settings_open: false,
+            home_open: false,
+            filter_menu: false,
+            insights_all: false,
+            panel_scroll: ScrollHandle::new(),
         };
         // The panel's width changes continuously under a drag, so it is
         // written down once, on the way out, with everything else.
@@ -676,14 +703,38 @@ impl Disktree {
     /// is left alone until a volume is picked; picking calls [`set_root`],
     /// which cancels it.
     pub fn open_volumes(&mut self, cx: &mut Context<'_, Self>) {
+        self.volumes_open = true;
+        self.focus_request = Some(FocusTarget::Dialog);
+        self.load_volumes(false, cx);
+    }
+
+    /// The home page: every disk with its name, size and room, as a file
+    /// manager's own first page shows them, the one being scanned too.
+    pub fn open_home(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.can_start_over() {
+            return;
+        }
+        self.home_open = true;
+        self.filter_menu = false;
+        self.load_volumes(true, cx);
+    }
+
+    /// Leave the page of disks without choosing one.
+    pub fn close_home(&mut self, cx: &mut Context<'_, Self>) {
+        self.home_open = false;
+        self.focus_request = Some(FocusTarget::Root);
+        cx.notify();
+    }
+
+    /// Read the volumes for the picker, or with `with_current` for the
+    /// page of disks, which shows the scanned one among the others.
+    fn load_volumes(&mut self, with_current: bool, cx: &mut Context<'_, Self>) {
         self.volume_epoch += 1;
         let epoch = self.volume_epoch;
         let root_path = self.root_path.clone();
         self.volumes.clear();
         self.volume_highlight = 0;
         self.volumes_loading = true;
-        self.volumes_open = true;
-        self.focus_request = Some(FocusTarget::Dialog);
         // Removable media and network volumes can take seconds to answer.
         // Keep Escape and the window responsive while probing them.
         let task = cx.background_executor().spawn(async move {
@@ -695,16 +746,20 @@ impl Disktree {
                     point: root.clone(),
                     device: device_for(&root),
                     space: space_info(&root).ok(),
+                    label: disktree_core::space::volume_label(&root),
                 });
             }
-            volumes.retain(|volume| volume.point != root_path);
+            if !with_current {
+                volumes.retain(|volume| volume.point != root_path);
+            }
             by_name(&mut volumes);
             volumes
         });
         cx.spawn(async move |this, cx| {
             let volumes = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.volumes_open && this.volume_epoch == epoch {
+                let wanted = this.volumes_open || this.home_open;
+                if wanted && this.volume_epoch == epoch {
                     this.volumes = volumes;
                     this.volumes_loading = false;
                     cx.notify();
@@ -735,10 +790,12 @@ impl Disktree {
             .map(|volume| volume.point.clone())
         else {
             self.volumes_open = false;
+            self.home_open = false;
             cx.notify();
             return;
         };
         self.volumes_open = false;
+        self.home_open = false;
         self.volumes.clear();
         self.set_root(point, cx);
     }
@@ -797,7 +854,148 @@ impl Disktree {
             mode: self.mode_index(),
             panel_rems: self.panel_rems,
             show_selection: self.show_selection,
+            deep_levels: self.deep_levels,
         }
+    }
+
+    /// The deepest the view may be asked to draw.
+    pub const fn depth_limit(&self) -> u32 {
+        if self.deep_levels {
+            DEEP_LEVELS
+        } else {
+            USUAL_LEVELS
+        }
+    }
+
+    /// Allow [`DEEP_LEVELS`], or go back to [`USUAL_LEVELS`] and to a
+    /// depth within them.
+    pub fn set_deep_levels(&mut self, on: bool, cx: &mut Context<'_, Self>) {
+        self.deep_levels = on;
+        let limit = self.depth_limit();
+        if self.layout_options.max_depth > limit {
+            self.layout_options.max_depth = limit;
+            self.cache = None;
+        }
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// The settings page, over whatever is on screen.
+    pub fn open_settings(&mut self, cx: &mut Context<'_, Self>) {
+        if !self.can_start_over() {
+            return;
+        }
+        self.settings_open = true;
+        self.filter_menu = false;
+        self.notice = None;
+        cx.notify();
+    }
+
+    pub fn close_settings(&mut self, cx: &mut Context<'_, Self>) {
+        self.settings_open = false;
+        self.focus_request = Some(FocusTarget::Root);
+        cx.notify();
+    }
+
+    /// Put a shortcut to this program on the Start menu or the desktop.
+    /// Off the UI thread: it waits on another program to write the link.
+    pub fn create_shortcut(
+        place: crate::shortcut::Place,
+        cx: &Context<'_, Self>,
+    ) {
+        let task = cx
+            .background_executor()
+            .spawn(async move { crate::shortcut::create(place) });
+        cx.spawn(async move |this, cx| {
+            let notice = match task.await {
+                Ok(link) => {
+                    (format!("added {}", link.display()), Status::Success)
+                }
+                Err(error) => (
+                    format!(
+                        "could not add a shortcut to {}: {error}",
+                        place.name()
+                    ),
+                    Status::Error,
+                ),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.notice = Some(notice);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // ── filtering by kind and size ──────────────────────────────────────
+
+    /// What the filter text asks for, read the way the search reads it.
+    pub fn filter_query(&self) -> disktree_core::filter::Query {
+        disktree_core::filter::Query::parse(&self.find)
+    }
+
+    pub fn toggle_filter_menu(&mut self, cx: &mut Context<'_, Self>) {
+        self.filter_menu = !self.filter_menu;
+        cx.notify();
+    }
+
+    /// Show only one kind of data, or with `None` every kind again. The
+    /// rest of what the filter asks, a name or a size, is kept.
+    pub fn filter_kind(
+        &mut self,
+        kind: Option<disktree_core::classify::Category>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use disktree_core::filter::{KIND_PREFIX, Query, kind_key};
+        let word = kind.map(|kind| format!("{KIND_PREFIX}{}", kind_key(kind)));
+        self.replace_filter_word(
+            |word| Query::parse(word).kind.is_some(),
+            word,
+            cx,
+        );
+    }
+
+    /// Show only files of at least `least`, written as the filter reads
+    /// it (`1g`), or with `None` files of any size again.
+    pub fn filter_size(
+        &mut self,
+        least: Option<&str>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use disktree_core::filter::{Query, SIZE_PREFIX};
+        let word = least.map(|least| format!("{SIZE_PREFIX}{least}"));
+        self.replace_filter_word(
+            |word| Query::parse(word).min_bytes.is_some(),
+            word,
+            cx,
+        );
+    }
+
+    /// Swap the one word of the filter text that `is_word` knows for
+    /// `word`, and show the result as Enter in the filter field would.
+    fn replace_filter_word(
+        &mut self,
+        is_word: impl Fn(&str) -> bool,
+        word: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let mut words: Vec<String> = self
+            .find
+            .split_whitespace()
+            .filter(|word| !is_word(word))
+            .map(str::to_owned)
+            .collect();
+        words.extend(word);
+        self.filter_menu = false;
+        if words.is_empty() {
+            self.clear_filter();
+            cx.notify();
+            return;
+        }
+        self.find = words.join(" ");
+        self.refresh_matches(cx);
+        self.apply_filter(cx);
+        cx.notify();
     }
 
     /// Take the saved choices the command line has no flag for. The depth
@@ -810,6 +1008,7 @@ impl Disktree {
         }
         self.panel_rems = saved.panel_rems;
         self.show_selection = saved.show_selection;
+        self.deep_levels = saved.deep_levels;
     }
 
     /// Write the view choices down. A failure goes to standard error and
@@ -840,7 +1039,17 @@ impl Disktree {
 
     /// `T`: the system's theme, then light, then dark, and round again.
     pub fn cycle_theme(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
-        self.theme_choice = self.theme_choice.next();
+        self.set_theme(self.theme_choice.next(), window, cx);
+    }
+
+    /// Draw with `choice` from now on, and remember it.
+    pub fn set_theme(
+        &mut self,
+        choice: ThemeChoice,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.theme_choice = choice;
         crate::appearance::choose(
             self.theme_choice,
             window.appearance(),
@@ -1016,7 +1225,12 @@ impl Disktree {
 
     /// A click on a key hint does what the key would.
     pub fn press(&mut self, key: &str, cx: &mut Context<'_, Self>) {
-        if self.confirm_open || self.volumes_open || self.path_open {
+        if self.confirm_open
+            || self.volumes_open
+            || self.path_open
+            || self.home_open
+            || self.settings_open
+        {
             return;
         }
         if key == "?" {
@@ -1031,8 +1245,9 @@ impl Disktree {
             // The hint names both keys and a click can only be one: it
             // draws one level more, and past the deepest starts over.
             Screen::Explore if key == "[ ]" => {
-                let step = if self.layout_options.max_depth >= 6 {
-                    -5
+                let limit = self.depth_limit();
+                let step = if self.layout_options.max_depth >= limit {
+                    1 - limit.cast_signed()
                 } else {
                     1
                 };
@@ -1048,8 +1263,20 @@ impl Disktree {
     fn refresh_insights(&mut self) {
         self.scanned_at = now_seconds();
         self.insights = self.tree.as_deref().map_or_else(Vec::new, |tree| {
-            worth_a_look(tree, self.scanned_at, INSIGHT_LIMIT)
+            let limit = if self.insights_all {
+                INSIGHT_MORE
+            } else {
+                INSIGHT_LIMIT
+            };
+            worth_a_look(tree, self.scanned_at, limit)
         });
+    }
+
+    /// "Show more" under Worth a look, and "Show fewer" to put it back.
+    pub fn toggle_insights(&mut self, cx: &mut Context<'_, Self>) {
+        self.insights_all = !self.insights_all;
+        self.refresh_insights();
+        cx.notify();
     }
 
     /// Ask git about `path` once, off the UI thread, if it is a checkout.
@@ -2341,7 +2568,8 @@ impl Disktree {
     /// a treemap: seeing further in without changing what is on screen.
     pub fn adjust_depth(&mut self, step: i32, cx: &mut Context<'_, Self>) {
         let depth = (self.layout_options.max_depth.cast_signed() + step)
-            .clamp(1, 6) as u32;
+            .clamp(1, self.depth_limit().cast_signed())
+            as u32;
         self.layout_options.max_depth = depth;
         self.cache = None;
         self.save_settings();
@@ -2692,6 +2920,8 @@ impl Disktree {
         self.screen == Screen::Explore
             && !self.confirm_open
             && !self.volumes_open
+            && !self.home_open
+            && !self.settings_open
     }
 
     /// Ask for a directory and scan it: an app opened from the Dock has no
@@ -2841,6 +3071,30 @@ impl Disktree {
             return;
         }
 
+        // The settings page has controls of its own; only Escape is ours.
+        if self.settings_open {
+            if key == "escape" {
+                self.close_settings(cx);
+            }
+            return;
+        }
+
+        // The page of disks takes the picker's keys.
+        if self.home_open {
+            match key {
+                "escape" => self.close_home(cx),
+                "enter" => self.choose_volume(cx),
+                "up" | "left" | "k" | "h" if !control => {
+                    self.move_volume_highlight(-1, cx);
+                }
+                "down" | "right" | "j" | "l" if !control => {
+                    self.move_volume_highlight(1, cx);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // The volume picker owns its keys while open: arrows move, Enter
         // picks, Escape closes, and nothing behind it acts.
         if self.volumes_open {
@@ -2871,6 +3125,13 @@ impl Disktree {
         }
         if self.power_menu.is_some() && self.on_power_key(key, cx) {
             return;
+        }
+        // Any key puts the Filter menu away; Escape does only that.
+        if std::mem::take(&mut self.filter_menu) {
+            cx.notify();
+            if key == "escape" {
+                return;
+            }
         }
 
         if self.show_help {

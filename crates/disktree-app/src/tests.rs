@@ -552,6 +552,7 @@ fn enter_in_the_focused_volume_picker_scans_the_selected_root(
             point: target.clone(),
             device: None,
             space: None,
+            label: None,
         }];
         app.volume_highlight = 0;
         app.volumes_open = true;
@@ -586,11 +587,13 @@ fn the_volume_picker_is_centred_and_still_dismisses_from_outside(
                     free: 500,
                     available: 400,
                 }),
+                label: None,
             },
             Volume {
                 point: PathBuf::from("/two"),
                 device: None,
                 space: None,
+                label: None,
             },
         ];
         app.volumes_open = true;
@@ -1851,6 +1854,7 @@ fn the_volume_picker_lists_volumes_by_name() {
         point: PathBuf::from(point),
         device: None,
         space: None,
+        label: None,
     };
     let mut volumes = vec![volume("E:\\"), volume("c:\\"), volume("D:\\")];
     crate::state::by_name(&mut volumes);
@@ -2013,10 +2017,8 @@ fn the_theme_steps_from_the_system_to_light_to_dark(cx: &mut TestAppContext) {
         assert!(matches!(cx.omarchy().appearance, ThemeAppearance::Light));
     });
 
-    // The button does what the key does, and a frame draws in each.
-    let button = cx.debug_bounds("theme").expect("the theme button");
-    cx.simulate_click(button.center(), gpui_kit::Modifiers::none());
-    draw(cx);
+    // Round again, and a frame draws in each.
+    press(cx, "shift-t");
     assert_eq!(read(&view, cx, |app| app.theme_choice), ThemeChoice::Dark);
     cx.update(|_, cx| {
         assert!(matches!(cx.omarchy().appearance, ThemeAppearance::Dark));
@@ -2079,4 +2081,176 @@ fn the_crumb_of_a_whole_volume_offers_the_other_volumes(
     cx.simulate_click(label.center(), gpui_kit::Modifiers::none());
     draw(cx);
     assert!(read(&view, cx, |app| app.volumes_open));
+}
+
+#[gpui_kit::test]
+fn a_page_closes_from_outside_it_and_not_from_inside(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+
+    press(cx, "?");
+    assert!(read(&view, cx, |app| app.show_help));
+    // A press on the card is the card's own.
+    let card = cx.debug_bounds("help-card").expect("the key list");
+    cx.simulate_click(card.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    assert!(read(&view, cx, |app| app.show_help));
+    // One beside it closes the page, and the keys are the treemap's again.
+    let page = cx.debug_bounds("help").expect("the page");
+    let outside = Point::new(page.origin.x + px(4.), page.origin.y + px(4.));
+    cx.simulate_click(outside, gpui_kit::Modifiers::none());
+    draw(cx);
+    assert!(!read(&view, cx, |app| app.show_help));
+    press(cx, "?");
+    assert!(read(&view, cx, |app| app.show_help));
+    press(cx, "escape");
+    assert!(!read(&view, cx, |app| app.show_help));
+}
+
+#[gpui_kit::test]
+fn the_settings_page_unlocks_deeper_levels(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+
+    let gear = cx.debug_bounds("settings").expect("the settings button");
+    cx.simulate_click(gear.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    assert!(read(&view, cx, |app| app.settings_open));
+    assert!(cx.debug_bounds("settings-card").is_some());
+    // Nothing behind the page takes a key while it is up.
+    press(cx, "]");
+    assert_eq!(read(&view, cx, |app| app.layout_options.max_depth), 3);
+    press(cx, "escape");
+    assert!(!read(&view, cx, |app| app.settings_open));
+
+    // Six levels is as deep as the view goes until more are allowed.
+    for _ in 0..9 {
+        press(cx, "]");
+    }
+    assert_eq!(read(&view, cx, |app| app.layout_options.max_depth), 6);
+    update(&view, cx, |app, cx| app.set_deep_levels(true, cx));
+    for _ in 0..9 {
+        press(cx, "]");
+    }
+    assert_eq!(read(&view, cx, |app| app.layout_options.max_depth), 10);
+    // Taking the allowance back brings the depth back within it.
+    update(&view, cx, |app, cx| app.set_deep_levels(false, cx));
+    draw(cx);
+    assert_eq!(read(&view, cx, |app| app.layout_options.max_depth), 6);
+}
+
+#[gpui_kit::test]
+fn the_page_of_disks_scans_the_one_clicked(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let target = temp.path().join("junk");
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+
+    let home = cx.debug_bounds("home").expect("the home button");
+    cx.simulate_click(home.center(), gpui_kit::Modifiers::none());
+    assert!(read(&view, cx, |app| app.home_open));
+    // Fixed disks, so this is not about the machine running the test.
+    update(&view, cx, |app, cx| {
+        app.volumes = vec![
+            Volume {
+                point: PathBuf::from("/elsewhere"),
+                device: None,
+                space: Some(SpaceInfo {
+                    total: 1_000,
+                    free: 50,
+                    available: 40,
+                }),
+                label: Some("Nearly full".into()),
+            },
+            Volume {
+                point: target.clone(),
+                device: None,
+                space: None,
+                label: None,
+            },
+        ];
+        app.volumes_loading = false;
+        cx.notify();
+    });
+    draw(cx);
+    // The treemap's keys are the page's while it is up.
+    press(cx, "c");
+    assert_eq!(read(&view, cx, |app| app.screen), Screen::Explore);
+    press(cx, "down");
+    assert_eq!(read(&view, cx, |app| app.volume_highlight), 1);
+
+    let drive = cx.debug_bounds("drive-1").expect("the second disk");
+    cx.simulate_click(drive.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    read(&view, cx, |app| {
+        assert!(!app.home_open);
+        assert_eq!(app.root_path, target);
+    });
+    finish_scan(&view, cx);
+}
+
+#[gpui_kit::test]
+fn the_filter_menu_narrows_by_size_and_kind(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+
+    let button = cx.debug_bounds("filter-control").expect("the button");
+    cx.simulate_click(button.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    assert!(read(&view, cx, |app| app.filter_menu));
+    assert!(
+        cx.debug_bounds("filter-menu").is_some(),
+        "the menu is drawn"
+    );
+    press(cx, "escape");
+    assert!(!read(&view, cx, |app| app.filter_menu));
+
+    // Files of 150 KiB and more: the two blobs, not the third or the note.
+    update(&view, cx, |app, cx| app.filter_size(Some("150k"), cx));
+    cx.run_until_parked();
+    draw(cx);
+    read(&view, cx, |app| {
+        let matches = app.matches.as_ref().expect("a filter");
+        assert_eq!(matches.count, 2);
+        assert_eq!(matches.bytes, 500_000);
+        assert!(app.filter_applied);
+    });
+    // A kind beside it keeps the size; nothing here is media that large.
+    update(&view, cx, |app, cx| {
+        app.filter_kind(Some(disktree_core::classify::Category::Media), cx);
+    });
+    cx.run_until_parked();
+    draw(cx);
+    read(&view, cx, |app| {
+        assert_eq!(app.find, ">150k kind:media");
+        assert_eq!(app.matches.as_ref().map(|found| found.count), Some(0));
+    });
+    // Taking both off again is no filter at all.
+    update(&view, cx, |app, cx| app.filter_kind(None, cx));
+    update(&view, cx, |app, cx| app.filter_size(None, cx));
+    cx.run_until_parked();
+    read(&view, cx, |app| {
+        assert!(app.find.is_empty());
+        assert!(app.matches.is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn worth_a_look_lists_more_when_asked(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    assert!(!read(&view, cx, |app| app.insights_all));
+    update(&view, cx, Disktree::toggle_insights);
+    draw(cx);
+    assert!(read(&view, cx, |app| app.insights_all));
+    assert!(cx.debug_bounds("disktree-root").is_some());
 }
