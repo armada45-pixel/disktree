@@ -2427,6 +2427,7 @@ fn side_panel(
                 .child(
                     div()
                         .id("panel-lists")
+                        .debug_selector(|| "panel-lists".into())
                         .flex()
                         .flex_col()
                         .gap(space::LG)
@@ -2448,6 +2449,8 @@ fn side_panel(
                     cx,
                 )),
         )
+        // Pinned under the lists, so it is there however long they are.
+        .children(insights_toggle(app, theme, cx))
         .children(notice_line(app, theme, cx))
         .children(privacy_line(app, theme, cx))
         .children(administrator_line(app, theme, cx))
@@ -2814,11 +2817,32 @@ fn worth_section(
                 ),
         );
     }
-    // Offered once the short list is full, since there may then be more;
-    // and while the long one is shown, to put the short one back.
-    if app.insights_all || app.insights.len() >= crate::state::INSIGHT_LIMIT {
-        section = section.child(
-            div().flex().flex_row().pt(space::XS).child(
+    section
+}
+
+/// "Show more" under Worth a look, and "Show fewer" to put the short list
+/// back. Offered once the short list is full, since there may then be
+/// more, and while the long one is shown.
+///
+/// It sits under the lists, not at the end of them: the long list is
+/// thirty rows, and a button at its foot is a scroll away from whoever
+/// wants the short one back.
+fn insights_toggle(
+    app: &Disktree,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Option<Div> {
+    let offered =
+        app.insights_all || app.insights.len() >= crate::state::INSIGHT_LIMIT;
+    offered.then(|| {
+        div()
+            .debug_selector(|| "insights-more".into())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(space::SM)
+            .flex_shrink_0()
+            .child(
                 button(
                     "insights-more",
                     if app.insights_all {
@@ -2826,7 +2850,7 @@ fn worth_section(
                     } else {
                         "Show more"
                     },
-                    ButtonVariant::Secondary,
+                    ButtonVariant::Outline,
                     cx,
                 )
                 .tab_stop(false)
@@ -2836,10 +2860,18 @@ fn worth_section(
                         window.focus(&this.focus, cx);
                     },
                 )),
-            ),
-        );
-    }
-    section
+            )
+            .child(
+                div()
+                    .text_size(text::CAPTION)
+                    .text_color(theme.secondary)
+                    .child(if app.insights_all {
+                        format!("{} worth a look", app.insights.len())
+                    } else {
+                        "of what is worth a look".to_owned()
+                    }),
+            )
+    })
 }
 
 /// A finding's title, as the last two parts of its path, and why it is on

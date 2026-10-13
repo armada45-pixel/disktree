@@ -2385,6 +2385,20 @@ fn worth_a_look_lists_more_when_asked(cx: &mut TestAppContext) {
     draw(cx);
     assert!(read(&view, cx, |app| app.insights_all));
     assert!(cx.debug_bounds("disktree-root").is_some());
+    // The way back is under the lists, not at the foot of them: it is
+    // there to press however far the long list runs.
+    let lists = cx.debug_bounds("panel-lists").expect("the lists");
+    let toggle = cx.debug_bounds("insights-more").expect("Show fewer");
+    assert!(
+        toggle.origin.y >= lists.origin.y + lists.size.height,
+        "the button is outside what scrolls"
+    );
+    cx.simulate_click(
+        toggle.origin + gpui_kit::point(gpui_kit::px(12.), gpui_kit::px(8.)),
+        gpui_kit::Modifiers::none(),
+    );
+    draw(cx);
+    assert!(!read(&view, cx, |app| app.insights_all));
 }
 
 #[gpui_kit::test]
