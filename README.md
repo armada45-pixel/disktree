@@ -159,7 +159,11 @@ holding a control character is escaped, so it cannot read as two rows.
 ### The screen
 
 - **Top:** the trail from `/`, then what is measured — **Size**, **Files** or
-  **Age**, **Hidden files**, **Apparent size**, and the depth drawn. In the
+  **Age**, **Hidden files**, **Apparent size**, and the depth drawn; at the
+  end, the theme (the system's, light or dark) and the way to GitHub. Click
+  the empty space beside the trail, or press `ctrl l`, and the trail becomes
+  a text field holding the path: copy it, or type or paste another and press
+  Enter to go there. In the
   tree a crumb goes there, and its ▾ lists its siblings, largest first with
   their share and size, to jump sideways (arrows and Enter work too). Above
   the scanned root a crumb is dimmer, and clicking it widens the scan to
@@ -249,8 +253,10 @@ and shows how much free space was actually gained.
 | `esc` while scanning | stop the scan |
 | `v` | scan another mounted volume |
 | `ctrl o` (`⌘O` on macOS) | choose another directory to scan |
+| `ctrl l` (`⌘L` on macOS) | type or paste a path to go to; `esc` puts the trail back |
 | `g` | the whole disk |
 | `p` | show or hide the selection line |
+| `T` | the system's theme, light or dark |
 | `o` | show it in Finder, File Explorer or the file manager |
 | right-click | open that directory in Finder, File Explorer or the file manager; a file is shown selected in its own |
 | `?` | every key |
@@ -260,6 +266,13 @@ On macOS the menu bar also has ⌘⇧R to show the selection in Finder, ⌘R to
 rescan, ⌘[ and ⌘] for back and forward, and ⌘Q, ⌘H and ⌘W (closing the
 window quits); other ⌘ chords are left to the system. On Linux and Windows
 the same work with ctrl, with F5 to rescan too.
+
+Every hint in the bar along the bottom is also a button for its key.
+
+The theme, the depth, Size / Files / Age, hidden files, apparent size and
+the panel's width are remembered between launches, in `disktree/settings`
+beside the Power Efficiency preset; an option on the command line still
+overrules what was saved.
 
 On the review screen: `m` trash, `p` permanent, `!` unmark all, `enter`
 commits, `esc` goes back. Or hand the list on instead of acting on it: `s`
@@ -293,11 +306,12 @@ and removes duplicate hardlinks.
 
 ## Switching volumes
 
-Press `v` (or click **Volumes** beside the disk name in the side panel) to
-bring up the volume picker. It lists every candidate volume mounted on the
-system together with its free space, ordered fullest first, filtering out
-pseudo-filesystems and duplicate btrfs/APFS mount points. Selecting any
-entry resets the scan root directly to that volume.
+Press `v`, or click the disk's name or **Volumes** beside it in the side
+panel, to bring up the volume picker. When the scan is of a whole volume,
+its crumb in the trail (`C:\` or `/`) opens it too. It lists every
+candidate volume mounted on the system together with its free space, by
+name, filtering out pseudo-filesystems and duplicate btrfs/APFS mount
+points. Selecting any entry resets the scan root directly to that volume.
 
 ## The whole disk
 

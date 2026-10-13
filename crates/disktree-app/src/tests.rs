@@ -1844,3 +1844,239 @@ fn the_power_menu_offers_only_what_the_cpus_can_tell_apart(
     draw(cx);
     assert!(read(&view, cx, |app| app.power_menu.is_none()));
 }
+
+#[test]
+fn the_volume_picker_lists_volumes_by_name() {
+    let volume = |point: &str| Volume {
+        point: PathBuf::from(point),
+        device: None,
+        space: None,
+    };
+    let mut volumes = vec![volume("E:\\"), volume("c:\\"), volume("D:\\")];
+    crate::state::by_name(&mut volumes);
+    let order: Vec<_> = volumes
+        .iter()
+        .map(|volume| volume.point.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(order, ["c:\\", "D:\\", "E:\\"]);
+}
+
+#[gpui_kit::test]
+fn a_click_on_a_key_hint_does_what_the_key_does(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+
+    let click = |cx: &mut Window, selector: &'static str| {
+        let hint = cx.debug_bounds(selector).expect("the hint is drawn");
+        cx.simulate_click(hint.center(), gpui_kit::Modifiers::none());
+        draw(cx);
+    };
+
+    // `]` draws one level more; past the deepest the hint starts over.
+    assert_eq!(read(&view, cx, |app| app.layout_options.max_depth), 3);
+    click(cx, "key-depth");
+    assert_eq!(read(&view, cx, |app| app.layout_options.max_depth), 4);
+    update(&view, cx, |app, cx| app.adjust_depth(2, cx));
+    draw(cx);
+    click(cx, "key-depth");
+    assert_eq!(read(&view, cx, |app| app.layout_options.max_depth), 1);
+
+    // `?` opens the key list, and the keyboard still closes it: the click
+    // must not have left the keys with the hint.
+    click(cx, "key-all keys");
+    assert!(read(&view, cx, |app| app.show_help));
+    press(cx, "escape");
+    assert!(!read(&view, cx, |app| app.show_help));
+
+    // `v` opens the picker, which takes the keyboard for itself.
+    click(cx, "key-volumes");
+    assert!(read(&view, cx, |app| app.volumes_open));
+    press(cx, "escape");
+    assert!(!read(&view, cx, |app| app.volumes_open));
+
+    // `space` marks the selection, as the key does.
+    assert!(read(&view, cx, |app| app.marks.is_empty()));
+    click(cx, "key-mark");
+    assert_eq!(read(&view, cx, |app| app.marks.len()), 1);
+
+    // And on the review screen the footer's hints are buttons too.
+    click(cx, "key-review");
+    assert_eq!(read(&view, cx, |app| app.screen), Screen::Review);
+    click(cx, "key-back");
+    assert_eq!(read(&view, cx, |app| app.screen), Screen::Explore);
+}
+
+#[gpui_kit::test]
+fn the_empty_part_of_the_trail_opens_a_path_field(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+
+    let space = cx
+        .debug_bounds("path-space")
+        .expect("room beside the trail");
+    cx.simulate_click(space.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    assert!(read(&view, cx, |app| app.path_open));
+    assert!(
+        cx.debug_bounds("path-field").is_some(),
+        "the field is drawn"
+    );
+    // It starts on the path on screen, to copy or to type over.
+    let shown = view.read_with(cx, |app, cx| {
+        app.path_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+    });
+    assert_eq!(shown, Some(temp.path().display().to_string()));
+
+    // What is typed there is text: `c` must not open the review screen,
+    // nor `?` the key list.
+    update(&view, cx, Disktree::toggle_mark_selected);
+    press(cx, "c");
+    press(cx, "?");
+    read(&view, cx, |app| {
+        assert_eq!(app.screen, Screen::Explore);
+        assert!(!app.show_help);
+        assert!(app.path_open);
+    });
+
+    // Escape puts the trail back and the keys with the treemap.
+    press(cx, "escape");
+    assert!(!read(&view, cx, |app| app.path_open));
+    assert!(cx.debug_bounds("path-space").is_some());
+    press(cx, "?");
+    assert!(read(&view, cx, |app| app.show_help));
+}
+
+#[gpui_kit::test]
+fn a_typed_path_goes_there_or_says_why_not(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    // Canonical, as a root from the command line is.
+    let root = dunce::canonicalize(temp.path()).expect("root");
+    let (view, cx) = view_over(&root, cx);
+    draw(cx);
+
+    // Inside the tree: a step within it, and no new scan.
+    let deeper = root.join("junk").join("deeper");
+    let quoted = format!("  \"{}\"  ", deeper.display());
+    assert!(update(&view, cx, |app, cx| app.go_to_path(&quoted, cx)));
+    read(&view, cx, |app| {
+        assert_eq!(app.current_path(), deeper);
+        assert_eq!(app.root_path, root);
+        assert!(app.scan.is_none(), "nothing was scanned again");
+    });
+
+    // A file names the directory it is in.
+    let file = root.join("keep").join("notes.txt");
+    let typed = file.display().to_string();
+    assert!(update(&view, cx, |app, cx| app.go_to_path(&typed, cx)));
+    assert_eq!(read(&view, cx, Disktree::current_path), root.join("keep"));
+
+    // Nowhere, and a path with nothing to be relative to: said, not done.
+    for typed in [root.join("no-such").display().to_string(), "junk".into()] {
+        assert!(!update(&view, cx, |app, cx| app.go_to_path(&typed, cx)));
+        read(&view, cx, |app| {
+            assert!(app.notice.is_some(), "{typed} is explained");
+            assert_eq!(app.current_path(), root.join("keep"));
+        });
+    }
+
+    // Outside the scanned root: that directory becomes the root.
+    let other = tempfile::TempDir::new().expect("tempdir");
+    let elsewhere = dunce::canonicalize(other.path()).expect("elsewhere");
+    let typed = elsewhere.display().to_string();
+    assert!(update(&view, cx, |app, cx| app.go_to_path(&typed, cx)));
+    assert_eq!(read(&view, cx, |app| app.root_path.clone()), elsewhere);
+    finish_scan(&view, cx);
+}
+
+#[gpui_kit::test]
+fn the_theme_steps_from_the_system_to_light_to_dark(cx: &mut TestAppContext) {
+    use crate::appearance::ThemeChoice;
+    use gpui_kit::base::ThemeAppearance;
+    use gpui_omarchy::ActiveTheme as _;
+
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    assert_eq!(read(&view, cx, |app| app.theme_choice), ThemeChoice::System);
+
+    press(cx, "shift-t");
+    assert_eq!(read(&view, cx, |app| app.theme_choice), ThemeChoice::Light);
+    cx.update(|_, cx| {
+        assert!(matches!(cx.omarchy().appearance, ThemeAppearance::Light));
+    });
+
+    // The button does what the key does, and a frame draws in each.
+    let button = cx.debug_bounds("theme").expect("the theme button");
+    cx.simulate_click(button.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    assert_eq!(read(&view, cx, |app| app.theme_choice), ThemeChoice::Dark);
+    cx.update(|_, cx| {
+        assert!(matches!(cx.omarchy().appearance, ThemeAppearance::Dark));
+    });
+    // `t` alone is still the Size | Files | Age switch.
+    press(cx, "t");
+    read(&view, cx, |app| {
+        assert_eq!(app.theme_choice, ThemeChoice::Dark);
+        assert_eq!(app.mode_index(), 1);
+    });
+}
+
+#[gpui_kit::test]
+fn view_choices_are_written_down_as_they_change(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let config = tempfile::TempDir::new().expect("tempdir");
+    let path = config.path().join("disktree").join("settings");
+    let (view, cx) = view_over(temp.path(), cx);
+    update(&view, cx, |app, _| app.settings_path = Some(path.clone()));
+    draw(cx);
+    assert!(!path.exists(), "nothing changed yet");
+
+    press(cx, "]");
+    press(cx, "shift-t");
+    press(cx, "p");
+    let saved = crate::settings::load(&path).expect("saved");
+    assert_eq!(saved.depth, 4);
+    assert_eq!(saved.theme, crate::appearance::ThemeChoice::Light);
+    assert!(!saved.show_selection);
+
+    // And a window opened with them starts as this one was left.
+    let again = update(&view, cx, |app, _| {
+        app.show_selection = true;
+        app.apply_settings(&saved);
+        app.settings()
+    });
+    assert!(!again.show_selection);
+    assert_eq!(again.theme, saved.theme);
+}
+
+#[gpui_kit::test]
+fn the_crumb_of_a_whole_volume_offers_the_other_volumes(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    // A directory with a disk above it is not one.
+    assert!(!read(&view, cx, Disktree::root_is_a_volume));
+    update(&view, cx, |app, _| {
+        app.disk_root = Some(app.root_path.clone());
+    });
+    assert!(read(&view, cx, Disktree::root_is_a_volume));
+    draw(cx);
+
+    // The disk's label in the panel is the same way on.
+    let label = cx.debug_bounds("disk-label").expect("the disk label");
+    cx.simulate_click(label.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    assert!(read(&view, cx, |app| app.volumes_open));
+}

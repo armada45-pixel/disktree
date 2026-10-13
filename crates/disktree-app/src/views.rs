@@ -93,6 +93,9 @@ pub fn root(
                 cx.notify();
                 return;
             }
+            if this.on_window_key(event, window, cx) {
+                return;
+            }
             this.on_key_down(event, cx);
             this.apply_focus(window, cx);
         }))
@@ -448,7 +451,7 @@ fn top_bar(
     window: &mut Window,
     cx: &mut Context<'_, Disktree>,
 ) -> Div {
-    div()
+    let bar = div()
         .flex()
         .flex_row()
         .items_center()
@@ -457,11 +460,44 @@ fn top_bar(
         .py(space::MD)
         .border_b_1()
         .border_color(theme.divider())
-        .child(logo(theme))
+        .child(logo(theme));
+    let bar = match app.path_input.clone().filter(|_| app.path_open) {
+        Some(input) => bar.child(
+            div()
+                .id("path-field")
+                .debug_selector(|| "path-field".into())
+                .flex_1()
+                .min_w_0()
+                .child(gpui_omarchy::input("path-input", &input, window, cx)),
+        ),
         // Where you are is navigation, and it belongs to the whole window.
-        .child(trail(app, theme, cx))
-        .child(div().flex_1())
-        .child(view_settings(app, window, cx))
+        None => bar.child(trail(app, theme, cx)).child(path_space(cx)),
+    };
+    bar.child(view_settings(app, window, cx))
+}
+
+/// The empty part of the trail's row. A click there turns the trail into a
+/// text field holding the path, as the same spot does in a file manager's
+/// address bar: to copy it, or to type or paste another.
+fn path_space(cx: &Context<'_, Disktree>) -> Stateful<Div> {
+    with_tooltip(
+        div()
+            .id("path-space")
+            .debug_selector(|| "path-space".into())
+            .flex_1()
+            // The row centres its children, and an empty one has no
+            // height of its own to click on.
+            .self_stretch()
+            .cursor_text()
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_path_bar(window, cx);
+            })),
+        if cfg!(target_os = "macos") {
+            "Type or paste a path \u{00b7} \u{2318}L"
+        } else {
+            "Type or paste a path \u{00b7} ctrl l"
+        },
+    )
 }
 
 /// The trail, from `/`. Above the scanned root, a crumb widens the scan;
@@ -553,12 +589,28 @@ fn tree_crumb(
     cx: &Context<'_, Disktree>,
 ) -> gpui_kit::AnyElement {
     let Some((&index, parent)) = path.split_last() else {
-        // The scanned root: no siblings in the tree to offer.
-        return widgets::crumb(id, label, current, cx)
-            .on_click(
-                cx.listener(move |this, _, _, cx| this.go_to(Vec::new(), cx)),
-            )
-            .into_any_element();
+        // The scanned root: no siblings in the tree to offer. Being there
+        // already, the crumb of a whole volume offers the other volumes
+        // instead, as a current crumb in the tree offers its siblings.
+        let volumes = current && app.root_is_a_volume();
+        let crumb = widgets::crumb(id, label, current, cx)
+            .when(volumes, |crumb| {
+                crumb.hover(|style| style.bg(theme.hover_fill()))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if volumes {
+                    this.open_volumes(cx);
+                    this.apply_focus(window, cx);
+                } else {
+                    this.go_to(Vec::new(), cx);
+                }
+            }));
+        return if volumes {
+            with_tooltip(crumb, "Scan another volume \u{00b7} v")
+                .into_any_element()
+        } else {
+            crumb.into_any_element()
+        };
     };
     let parent = parent.to_vec();
     let open = app
@@ -834,10 +886,7 @@ fn view_settings(
         )
         .tab_stop(false)
         .on_change(move |_, _, window, cx| {
-            let _ = entity.update(cx, |this, cx| {
-                this.options.include_hidden = !this.options.include_hidden;
-                this.start_scan(cx);
-            });
+            let _ = entity.update(cx, Disktree::toggle_hidden);
             window.focus(&focus, cx);
         })
     };
@@ -850,10 +899,7 @@ fn view_settings(
         )
         .tab_stop(false)
         .on_change(move |_, _, window, cx| {
-            let _ = entity.update(cx, |this, cx| {
-                this.options.apparent_size = !this.options.apparent_size;
-                this.start_scan(cx);
-            });
+            let _ = entity.update(cx, Disktree::toggle_apparent_size);
             window.focus(&focus, cx);
         })
     };
@@ -982,6 +1028,70 @@ fn view_settings(
         .child(apparent)
         .child(depth_control)
         .child(power_efficiency(app, cx))
+        .child(theme_button(app, &theme, cx))
+        .child(repository_button(&theme, cx))
+}
+
+/// A glyph on the bar that does one thing when clicked.
+fn bar_icon(
+    id: &'static str,
+    name: gpui_omarchy::IconName,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .p(space::XS)
+        .text_color(theme.secondary)
+        .hover(|style| style.bg(theme.hover_fill()).text_color(theme.bright))
+        .child(gpui_omarchy::icon(name).size(icon::MD))
+}
+
+/// Whose palette is drawn, as the glyph of the choice in force; a click
+/// steps to the next one.
+fn theme_button(
+    app: &Disktree,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Stateful<Div> {
+    use crate::appearance::ThemeChoice;
+    use gpui_omarchy::IconName;
+
+    let choice = app.theme_choice;
+    let glyph = match choice {
+        ThemeChoice::System => IconName::Palette,
+        ThemeChoice::Light => IconName::Sun,
+        ThemeChoice::Dark => IconName::Moon,
+    };
+    with_tooltip(
+        bar_icon("theme", glyph, theme).on_click(cx.listener(
+            |this, _, window, cx| {
+                this.cycle_theme(window, cx);
+                window.focus(&this.focus, cx);
+            },
+        )),
+        format!(
+            "Theme: {} \u{00b7} click or T for {}",
+            choice.name(),
+            choice.next().name()
+        ),
+    )
+}
+
+/// The way to the source, the releases and the issue tracker.
+fn repository_button(
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Stateful<Div> {
+    with_tooltip(
+        bar_icon("repository", gpui_omarchy::IconName::Github, theme).on_click(
+            cx.listener(|this, _, window, cx| {
+                Disktree::open_repository(cx);
+                window.focus(&this.focus, cx);
+            }),
+        ),
+        "disktree on GitHub",
+    )
 }
 
 /// What the tooltip says the choice will do, where the gauge alone cannot.
@@ -2014,13 +2124,28 @@ fn disk_section(
         .flex_row()
         .items_center()
         .gap(space::SM)
-        .child(widgets::eyebrow("Disk", cx))
-        .child(
+        .child(with_tooltip(
             div()
-                .text_size(text::CAPTION)
-                .text_color(theme.secondary.opacity(0.6))
-                .child(device),
-        )
+                .id("disk-label")
+                .debug_selector(|| "disk-label".into())
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space::SM)
+                .hover(|style| style.bg(theme.hover_fill()))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_volumes(cx);
+                    this.apply_focus(window, cx);
+                }))
+                .child(widgets::eyebrow("Disk", cx))
+                .child(
+                    div()
+                        .text_size(text::CAPTION)
+                        .text_color(theme.secondary.opacity(0.6))
+                        .child(device),
+                ),
+            "Scan another volume \u{00b7} v",
+        ))
         .child(div().flex_1())
         .child(
             button("volumes", "Volumes", ButtonVariant::Secondary, cx)
@@ -2208,20 +2333,23 @@ fn review_button(
 
 /// The keys, quietly: outlines and light labels, there when needed. The key
 /// to every other key and the scan's own numbers hold the trailing edge.
-fn key_bar(app: &Disktree, theme: &Theme, cx: &App) -> Div {
-    // Most useful first, so a narrow window clips the least useful.
-    let hints: [(&str, &str); 11] = [
-        ("space", "mark"),
-        ("enter", "open"),
-        ("\u{232b}", "up"),
-        ("c", "review"),
-        ("hjkl", "move"),
-        ("/", "filter"),
-        ("[ ]", "depth"),
-        ("t", "mode"),
-        ("0", "reset"),
-        ("v", "volumes"),
-        ("r", "rescan"),
+fn key_bar(app: &Disktree, theme: &Theme, cx: &Context<'_, Disktree>) -> Div {
+    // Most useful first, so a narrow window clips the least useful. Each
+    // is a button for the key it names, for a hand already on the mouse;
+    // the last column is that key as the bindings spell it. Moving between
+    // tiles is four keys and no one click, so it stays a label.
+    let hints: [(&str, &str, Option<&str>); 11] = [
+        ("space", "mark", Some("space")),
+        ("enter", "open", Some("enter")),
+        ("\u{232b}", "up", Some("backspace")),
+        ("c", "review", Some("c")),
+        ("hjkl", "move", None),
+        ("/", "filter", Some("/")),
+        ("[ ]", "depth", Some("[ ]")),
+        ("t", "mode", Some("t")),
+        ("0", "reset", Some("0")),
+        ("v", "volumes", Some("v")),
+        ("r", "rescan", Some("r")),
     ];
     let mut lane = div()
         .flex()
@@ -2231,8 +2359,13 @@ fn key_bar(app: &Disktree, theme: &Theme, cx: &App) -> Div {
         .flex_1()
         .min_w_0()
         .overflow_hidden();
-    for (keys, label) in hints {
-        lane = lane.child(widgets::hint(keys, label, cx).flex_shrink_0());
+    for (keys, label, key) in hints {
+        lane = lane.child(match key {
+            Some(key) => key_hint(keys, label, key, cx).into_any_element(),
+            None => widgets::hint(keys, label, cx)
+                .flex_shrink_0()
+                .into_any_element(),
+        });
     }
 
     let mut row = div()
@@ -2274,14 +2407,35 @@ fn key_bar(app: &Disktree, theme: &Theme, cx: &App) -> Div {
             widgets::human_count(app.progress.files)
         )
     };
-    row.child(widgets::hint("?", "all keys", cx).flex_shrink_0())
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_size(text::CAPTION)
-                .text_color(theme.secondary.opacity(0.7))
-                .child(scan),
-        )
+    row.child(key_hint("?", "all keys", "?", cx)).child(
+        div()
+            .flex_shrink_0()
+            .text_size(text::CAPTION)
+            .text_color(theme.secondary.opacity(0.7))
+            .child(scan),
+    )
+}
+
+/// A key hint that is also a button: a click does what `key` does, and the
+/// keyboard goes back to where that leaves it.
+fn key_hint(
+    keys: &'static str,
+    label: &'static str,
+    key: &'static str,
+    cx: &Context<'_, Disktree>,
+) -> Stateful<Div> {
+    let id = format!("key-{label}");
+    widgets::hint_button(ElementId::Name(id.clone().into()), keys, label, cx)
+        .debug_selector(move || id)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.press(key, cx);
+            // A dialog the key opened takes the keyboard; anything else
+            // hands it back to the treemap, which a click took it from.
+            if this.focus_request.is_none() {
+                window.focus(&this.focus, cx);
+            }
+            this.apply_focus(window, cx);
+        }))
 }
 
 /// What the viewport shows while the first scan is running.
@@ -2934,7 +3088,11 @@ fn commit_controls(
         )
 }
 
-fn review_footer(app: &Disktree, theme: &Theme, cx: &App) -> Div {
+fn review_footer(
+    app: &Disktree,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Div {
     let commit = match app.removal_mode {
         RemovalMode::Trash => "move to trash",
         RemovalMode::Permanent => "delete\u{2026}",
@@ -2948,13 +3106,13 @@ fn review_footer(app: &Disktree, theme: &Theme, cx: &App) -> Div {
         .py(space::SM)
         .border_t_1()
         .border_color(theme.divider())
-        .child(widgets::hint("enter", commit, cx))
-        .child(widgets::hint("m", "trash", cx))
-        .child(widgets::hint("p", "permanent", cx))
-        .child(widgets::hint("!", "unmark all", cx))
-        .child(widgets::hint("s", "save list", cx))
-        .child(widgets::hint("a", "copy as prompt", cx))
-        .child(widgets::hint("esc", "back", cx))
+        .child(key_hint("enter", commit, "enter", cx))
+        .child(key_hint("m", "trash", "m", cx))
+        .child(key_hint("p", "permanent", "p", cx))
+        .child(key_hint("!", "unmark all", "!", cx))
+        .child(key_hint("s", "save list", "s", cx))
+        .child(key_hint("a", "copy as prompt", "a", cx))
+        .child(key_hint("esc", "back", "escape", cx))
         .child(div().flex_1())
         .child(
             div()
@@ -3494,6 +3652,11 @@ const MODIFIER_OPEN: &str = if cfg!(target_os = "macos") {
 } else {
     "ctrl-o"
 };
+const MODIFIER_PATH: &str = if cfg!(target_os = "macos") {
+    "\u{2318}L"
+} else {
+    "ctrl-l"
+};
 
 fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
     let theme = cx.omarchy();
@@ -3526,12 +3689,17 @@ fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
         ("t", "Size, files or age: what areas and colours say"),
         ("r", "Scan again from the same root"),
         ("esc", "Stop a scan in progress"),
-        ("v", "Scan another volume"),
+        ("v", "Scan another volume; so does the disk's own name"),
         (MODIFIER_OPEN, "Choose another directory to scan"),
+        (
+            MODIFIER_PATH,
+            "Type or paste a path; a click beside the trail does too",
+        ),
         ("g", "The whole disk; click any directory above to widen"),
         ("d", "Disk usage or apparent size"),
         ("i", "Include or skip hidden entries"),
         ("p", "Show or hide the selection line"),
+        ("T", "System, light or dark theme"),
         (
             "o",
             if cfg!(target_os = "macos") {

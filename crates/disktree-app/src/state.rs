@@ -25,15 +25,18 @@ use disktree_core::tree::{Metric, Node, path_of};
 use disktree_core::treemap::{
     LayoutOptions, Rect, Tile, TileKind, hit, layout_filtered,
 };
+use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::{
-    Context, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, NavigationDirection, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, Size, Window, px, size,
+    AppContext as _, Context, Entity, FocusHandle, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, NavigationDirection, Pixels, Point, Render,
+    ScrollDelta, ScrollWheelEvent, Size, Window, px, size,
 };
 use gpui_omarchy::Status;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::appearance::ThemeChoice;
 use crate::git::GitState;
+use crate::settings::Settings;
 
 use crate::marks::{Marks, display_path, is_hidden};
 use crate::treemap_view::{Mosaic, TileDeco};
@@ -98,6 +101,10 @@ pub fn panel_width(pointer_x: f32, viewport: f32, rem: f32) -> f32 {
         (viewport / rem - PANEL_MIN_REMS).clamp(PANEL_MIN_REMS, PANEL_MAX_REMS);
     width.clamp(PANEL_MIN_REMS, max)
 }
+
+/// Where the source and the issue tracker are, for the button that goes
+/// there.
+pub const REPOSITORY: &str = "https://github.com/tobi/disktree";
 
 /// How many "worth a look" findings the panel lists.
 const INSIGHT_LIMIT: usize = 6;
@@ -468,6 +475,14 @@ pub struct Disktree {
     pub scan_elapsed: Option<Duration>,
     /// Unix seconds when the tree landed: the "now" ages are measured from.
     pub scanned_at: i64,
+    /// Where the view choices are saved. `None` keeps them for this run
+    /// only: no settings directory, or a test that must not write to one.
+    pub settings_path: Option<PathBuf>,
+    pub theme_choice: ThemeChoice,
+    /// The path field in the top bar, built the first time it is opened.
+    pub path_input: Option<Entity<InputState>>,
+    /// The trail is a text field just now: see [`Self::open_path_bar`].
+    pub path_open: bool,
 }
 
 impl Disktree {
@@ -565,7 +580,18 @@ impl Disktree {
             scan_root: PathBuf::new(),
             scan_elapsed: None,
             scanned_at: now_seconds(),
+            settings_path: None,
+            theme_choice: ThemeChoice::default(),
+            path_input: None,
+            path_open: false,
         };
+        // The panel's width changes continuously under a drag, so it is
+        // written down once, on the way out, with everything else.
+        cx.on_app_quit(|this, _| {
+            this.save_settings();
+            std::future::ready(())
+        })
+        .detach();
         tree.device = device_for(&tree.root_path);
         tree.full_disk_access = tree
             .home
@@ -686,6 +712,7 @@ impl Disktree {
                 });
             }
             volumes.retain(|volume| volume.point != root_path);
+            by_name(&mut volumes);
             volumes
         });
         cx.spawn(async move |this, cx| {
@@ -762,6 +789,272 @@ impl Disktree {
             self.go_to(Vec::new(), cx);
         } else {
             self.widen_to(disk, cx);
+        }
+    }
+
+    /// Whether the scanned root is itself a volume: there is nothing above
+    /// it to widen to, so the only way on from its crumb is another volume.
+    pub fn root_is_a_volume(&self) -> bool {
+        self.root_path.parent().is_none()
+            || self.disk_root.as_deref() == Some(self.root_path.as_path())
+    }
+
+    // ── saved choices ───────────────────────────────────────────────────
+
+    /// The view choices as they stand, for the settings file.
+    pub const fn settings(&self) -> Settings {
+        Settings {
+            theme: self.theme_choice,
+            depth: self.layout_options.max_depth,
+            include_hidden: self.options.include_hidden,
+            apparent_size: self.options.apparent_size,
+            mode: self.mode_index(),
+            panel_rems: self.panel_rems,
+            show_selection: self.show_selection,
+        }
+    }
+
+    /// Take the saved choices the command line has no flag for. The depth
+    /// and the scan options arrive through the arguments instead, where a
+    /// flag can overrule them.
+    pub const fn apply_settings(&mut self, saved: &Settings) {
+        self.theme_choice = saved.theme;
+        if saved.mode == 2 {
+            self.color_mode = ColorMode::Age;
+        }
+        self.panel_rems = saved.panel_rems;
+        self.show_selection = saved.show_selection;
+    }
+
+    /// Write the view choices down. A failure goes to standard error and
+    /// no further: the choice still holds for this run, and a notice on
+    /// every click would be worse than the loss.
+    pub fn save_settings(&self) {
+        let Some(path) = self.settings_path.as_deref() else {
+            return;
+        };
+        if let Err(error) = crate::settings::save(path, &self.settings()) {
+            eprintln!("Cannot save settings: {error}");
+        }
+    }
+
+    /// `i`: include or skip hidden entries, which changes what is measured.
+    pub fn toggle_hidden(&mut self, cx: &mut Context<'_, Self>) {
+        self.options.include_hidden = !self.options.include_hidden;
+        self.save_settings();
+        self.start_scan(cx);
+    }
+
+    /// `d`: disk usage or apparent size, which changes what is measured.
+    pub fn toggle_apparent_size(&mut self, cx: &mut Context<'_, Self>) {
+        self.options.apparent_size = !self.options.apparent_size;
+        self.save_settings();
+        self.start_scan(cx);
+    }
+
+    /// `T`: the system's theme, then light, then dark, and round again.
+    pub fn cycle_theme(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
+        self.theme_choice = self.theme_choice.next();
+        crate::appearance::choose(
+            self.theme_choice,
+            window.appearance(),
+            self.home.as_deref(),
+            cx,
+        );
+        self.notice = Some((
+            format!("{} theme", self.theme_choice.name()),
+            Status::Neutral,
+        ));
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Open the project's page in the browser.
+    pub fn open_repository(cx: &Context<'_, Self>) {
+        cx.open_url(REPOSITORY);
+    }
+
+    // ── the path field ──────────────────────────────────────────────────
+
+    /// Click the empty part of the trail, or `ctrl l`: the trail becomes a
+    /// text field holding the path on screen, selected. Copy it from there,
+    /// or type or paste another over it and press Enter to go there, as a
+    /// file manager's address bar does.
+    pub fn open_path_bar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.can_start_over() {
+            return;
+        }
+        let input = if let Some(input) = self.path_input.clone() {
+            input
+        } else {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            cx.subscribe_in(&input, window, Self::on_path_event)
+                .detach();
+            self.path_input = Some(input.clone());
+            input
+        };
+        let shown = self.current_path().display().to_string();
+        input.update(cx, |state, cx| {
+            state.set_value(shown, window, cx);
+            state.select_all(window, cx);
+            state.focus(window, cx);
+        });
+        self.path_open = true;
+        self.crumb_menu = None;
+        self.power_menu = None;
+        cx.notify();
+    }
+
+    /// Put the trail back and return the keyboard to the treemap.
+    pub fn close_path_bar(&mut self, cx: &mut Context<'_, Self>) {
+        self.path_open = false;
+        self.focus_request = Some(FocusTarget::Root);
+        cx.notify();
+    }
+
+    fn on_path_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match event {
+            InputEvent::PressEnter { .. } if self.path_open => {
+                let typed = input.read(cx).value().to_string();
+                // A path that cannot be used leaves the field open, with
+                // the reason beside it, so it can be corrected in place.
+                if self.go_to_path(&typed, cx) {
+                    self.close_path_bar(cx);
+                    self.apply_focus(window, cx);
+                }
+            }
+            // The keyboard went elsewhere, to a click on the mosaic say:
+            // the field has nothing left to do.
+            InputEvent::Blur if self.path_open => {
+                self.path_open = false;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// Go to a path that was typed or pasted. Inside the scanned tree that
+    /// is a step within it; above the root it widens the scan, reusing what
+    /// is measured; anywhere else it is scanned from scratch. A file names
+    /// the directory it is in. Returns whether there was somewhere to go.
+    pub fn go_to_path(
+        &mut self,
+        typed: &str,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let refuse = |this: &mut Self, why: String| {
+            this.notice = Some((why, Status::Warning));
+            false
+        };
+        // "Copy as path" in File Explorer wraps the path in quotes.
+        let typed = typed.trim().trim_matches('"').trim();
+        let Some(path) = typed_path(typed, self.home.as_deref()) else {
+            cx.notify();
+            return refuse(
+                self,
+                format!("{typed} is not a full path: start from the root"),
+            );
+        };
+        // Canonical, like a root from the command line, so the tree's own
+        // paths and this one can be compared.
+        let Ok(real) = dunce::canonicalize(&path) else {
+            cx.notify();
+            return refuse(self, format!("{} cannot be read", path.display()));
+        };
+        let directory = if real.is_dir() {
+            real
+        } else {
+            match real.parent() {
+                Some(parent) => parent.to_path_buf(),
+                None => real,
+            }
+        };
+        self.notice = None;
+        let within = self
+            .crumbs_for_path(&directory)
+            .filter(|crumbs| self.node_at(crumbs).is_some_and(Node::is_dir));
+        if let Some(crumbs) = within {
+            self.go_to(crumbs, cx);
+        } else if self.root_path.starts_with(&directory) {
+            self.widen_to(directory, cx);
+        } else {
+            // Elsewhere, or inside the root but not in the tree: hidden
+            // while hidden entries are skipped, or made since the scan.
+            self.set_root(directory, cx);
+        }
+        true
+    }
+
+    /// The keys that need the window: `T` for the theme and `ctrl l` for
+    /// the path field. Only where the treemap has the keyboard, so neither
+    /// fires under a dialog, a menu or the filter.
+    pub fn on_window_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let quiet = self.can_start_over()
+            && !self.path_open
+            && !self.find_open
+            && !self.show_help
+            && self.crumb_menu.is_none()
+            && self.power_menu.is_none();
+        if !quiet {
+            return false;
+        }
+        let modifiers = &event.keystroke.modifiers;
+        let chord = modifiers.control || modifiers.platform;
+        match event.keystroke.key.as_str() {
+            "t" if modifiers.shift && !chord && !modifiers.alt => {
+                self.cycle_theme(window, cx);
+            }
+            // The address bar's key in browsers and file managers.
+            "l" if chord && !modifiers.shift && !modifiers.alt => {
+                self.open_path_bar(window, cx);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// A click on a key hint does what the key would.
+    pub fn press(&mut self, key: &str, cx: &mut Context<'_, Self>) {
+        if self.confirm_open || self.volumes_open || self.path_open {
+            return;
+        }
+        if key == "?" {
+            self.show_help = !self.show_help;
+            cx.notify();
+            return;
+        }
+        if self.show_help {
+            return;
+        }
+        match self.screen {
+            // The hint names both keys and a click can only be one: it
+            // draws one level more, and past the deepest starts over.
+            Screen::Explore if key == "[ ]" => {
+                let step = if self.layout_options.max_depth >= 6 {
+                    -5
+                } else {
+                    1
+                };
+                self.adjust_depth(step, cx);
+            }
+            Screen::Explore => self.on_explore_key(key, false, false, cx),
+            Screen::Review => self.on_review_key(key, cx),
+            Screen::Running | Screen::Done => {}
         }
     }
 
@@ -2134,6 +2427,7 @@ impl Disktree {
             .clamp(1, 6) as u32;
         self.layout_options.max_depth = depth;
         self.cache = None;
+        self.save_settings();
         cx.notify();
     }
 
@@ -2180,6 +2474,7 @@ impl Disktree {
         if self.options.metric != metric {
             self.toggle_metric(cx);
         }
+        self.save_settings();
         cx.notify();
     }
 
@@ -2646,6 +2941,15 @@ impl Disktree {
             return;
         }
 
+        // So does the path field: what is typed there is text, not
+        // commands. Escape arrives here once the field has no use for it.
+        if self.path_open {
+            if key == "escape" {
+                self.close_path_bar(cx);
+            }
+            return;
+        }
+
         // The volume picker owns its keys while open: arrows move, Enter
         // picks, Escape closes, and nothing behind it acts.
         if self.volumes_open {
@@ -2839,16 +3143,11 @@ impl Disktree {
             "r" if !control => self.start_scan(cx),
             "g" if !control => self.go_to_disk(cx),
             "v" if !control && !shift => self.open_volumes(cx),
-            "i" if !control => {
-                self.options.include_hidden = !self.options.include_hidden;
-                self.start_scan(cx);
-            }
-            "d" if !control => {
-                self.options.apparent_size = !self.options.apparent_size;
-                self.start_scan(cx);
-            }
+            "i" if !control => self.toggle_hidden(cx),
+            "d" if !control => self.toggle_apparent_size(cx),
             "p" if !control => {
                 self.show_selection = !self.show_selection;
+                self.save_settings();
                 cx.notify();
             }
             "o" if !control => self.reveal_target(cx),
@@ -3261,6 +3560,39 @@ pub fn restart_args(
     args.push(depth.to_string().into());
     args.push(root.as_os_str().to_owned());
     args
+}
+
+/// Order the picker's volumes by name, as a file manager lists drives: a
+/// volume is found where its letter or name says, however full it happens
+/// to be. Without regard to case, so `/Volumes/archive` is not sent below
+/// every capital.
+pub fn by_name(volumes: &mut [disktree_core::space::Volume]) {
+    volumes.sort_by_cached_key(|volume| {
+        volume.point.to_string_lossy().to_lowercase()
+    });
+}
+
+/// What was typed in the path field, as a path to look for: `~` is the home
+/// directory, and a bare drive letter is that drive's root. `None` for a
+/// relative path, which has no directory here to be relative to.
+fn typed_path(typed: &str, home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(rest) = typed.strip_prefix('~')
+        && (rest.is_empty() || rest.starts_with(['/', '\\']))
+    {
+        return Some(home?.join(rest.trim_start_matches(['/', '\\'])));
+    }
+    // `D:` alone means "the current directory on D" to Windows, which a
+    // window does not have; the drive is what was meant.
+    let drive = cfg!(windows)
+        && typed.len() == 2
+        && typed.ends_with(':')
+        && typed.starts_with(|letter: char| letter.is_ascii_alphabetic());
+    let path = if drive {
+        PathBuf::from(format!("{typed}\\"))
+    } else {
+        PathBuf::from(typed)
+    };
+    path.is_absolute().then_some(path)
 }
 
 /// Now, in Unix seconds.
