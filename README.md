@@ -280,6 +280,25 @@ system together with its free space, ordered fullest first, filtering out
 pseudo-filesystems and duplicate btrfs/APFS mount points. Selecting any
 entry resets the scan root directly to that volume.
 
+## Another machine, over SSH
+
+The path field (`ctrl l`) takes an address as well as a path:
+`user@host:/path`, a `Host` from your SSH config as `host:/path`, or
+`ssh://user@host:2222/path`, scans that directory on another machine. The
+other machine runs `find` and the tree is built from what it lists, so
+nothing is installed there, but it has to have GNU `find`: a Linux machine,
+not macOS or a BSD.
+
+The connection is your own `ssh`: its keys, agent, config and
+`known_hosts`. disktree never asks for a password, and a host it has not
+seen before is refused rather than trusted, so connect once from a
+terminal first.
+
+A remote scan is **read-only**. Its paths are the other machine's, and the
+same path may exist on this one, so nothing can be marked or removed, and
+the file manager, git and the free-space meter are off until a local
+directory is scanned again.
+
 ## The whole disk
 
 Click `/` (or any directory above the scanned root) in the trail, press

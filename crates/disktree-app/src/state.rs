@@ -369,6 +369,10 @@ pub struct Disktree {
     pub treemap_size: Rc<Cell<Size<Pixels>>>,
 
     pub marks: Marks,
+    /// The machine being scanned over SSH, when it is not this one. While
+    /// set, the tree's paths are that machine's, and nothing that acts on
+    /// a local path is offered: see [`Self::set_remote`].
+    pub remote: Option<disktree_core::remote::Remote>,
     pub removal_mode: RemovalMode,
     pub trash_backend: TrashBackend,
     /// The permanent-deletion alert dialog is open. Trash needs no dialog: it
@@ -504,6 +508,7 @@ impl Disktree {
             treemap_origin: Rc::new(Cell::new(Point::new(px(0.), px(0.)))),
             treemap_size: Rc::new(Cell::new(size(px(0.), px(0.)))),
             marks: Marks::default(),
+            remote: None,
             // Reversible by default whenever this machine has a trash: the
             // permanent path stays one choice away, behind a dialog.
             removal_mode: if trash_backend.is_available() {
@@ -604,6 +609,7 @@ impl Disktree {
     /// Scan a different root from scratch. Marks are kept; a mark outside
     /// the new root is shown as kept back, never removed.
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<'_, Self>) {
+        self.remote = None;
         self.space = space_info(&root).ok();
         self.device = device_for(&root);
         // "Whole disk" means the disk of what is on screen, which a new root
@@ -616,12 +622,65 @@ impl Disktree {
         self.start_scan(cx);
     }
 
+    /// Scan a directory on another machine, over SSH, to look at.
+    ///
+    /// The tree that comes back holds that machine's paths. Nothing here
+    /// may then treat one as a path on this machine: the same `/var/log`
+    /// may well exist on both, and removing it here because it was marked
+    /// there would delete the wrong files. So marks are dropped and
+    /// marking refused, and so are the file manager, git and the free
+    /// space meter, until a local root is scanned again.
+    pub fn set_remote(
+        &mut self,
+        remote: disktree_core::remote::Remote,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.marks.clear();
+        self.space = None;
+        self.space_baseline = None;
+        self.device = Some(remote.target.clone());
+        self.disk_root = None;
+        self.file_table = false;
+        self.root_path = PathBuf::from(&remote.path);
+        self.notice = Some((
+            format!("{remote} over ssh \u{00b7} a remote scan is read-only"),
+            Status::Neutral,
+        ));
+        self.remote = Some(remote);
+        self.screen = Screen::Explore;
+        self.start_scan(cx);
+    }
+
+    /// Whether what is on screen is another machine's, and so may only be
+    /// looked at. Says so when `doing` something that would act on it.
+    fn read_only(&mut self, doing: &str, cx: &mut Context<'_, Self>) -> bool {
+        let Some(remote) = &self.remote else {
+            return false;
+        };
+        self.notice = Some((
+            format!(
+                "{doing} is not offered for {}: a remote scan is read-only",
+                remote.target
+            ),
+            Status::Warning,
+        ));
+        cx.notify();
+        true
+    }
+
     /// Go up to `above`, a directory containing the scanned root.
     ///
     /// Memoized: the tree already measured is handed to the walk and reused
     /// where it is reached, so only what is new at the wider level is read,
     /// and the current view stays on screen until the wider tree lands.
     pub fn widen_to(&mut self, above: PathBuf, cx: &mut Context<'_, Self>) {
+        // A wider look at another machine is another listing of it: the
+        // tree in hand cannot be handed to a walk of this one.
+        if let Some(remote) = &self.remote {
+            let wider = remote.at(&above.to_string_lossy());
+            self.set_remote(wider, cx);
+            return;
+        }
         let Some(tree) = self.tree.clone() else {
             self.set_root(above, cx);
             return;
@@ -768,7 +827,11 @@ impl Disktree {
 
     /// Ask git about `path` once, off the UI thread, if it is a checkout.
     pub fn ensure_git(&mut self, path: &Path, cx: &Context<'_, Self>) {
-        if self.git.contains_key(path) || self.git_pending.contains(path) {
+        // git would be asked about this machine's directory of that name.
+        if self.remote.is_some()
+            || self.git.contains_key(path)
+            || self.git_pending.contains(path)
+        {
             return;
         }
         let path = path.to_path_buf();
@@ -947,10 +1010,14 @@ impl Disktree {
         self.scan_started = Some(Instant::now());
         self.scan_elapsed = None;
         self.scan_root.clone_from(&self.root_path);
-        self.scan = Some(ScanHandle::spawn(
-            self.root_path.clone(),
-            self.options.clone(),
-        ));
+        self.scan = Some(match &self.remote {
+            Some(remote) => {
+                ScanHandle::spawn_remote(remote.clone(), self.options.clone())
+            }
+            None => {
+                ScanHandle::spawn(self.root_path.clone(), self.options.clone())
+            }
+        });
         Self::poll_scan(epoch, cx);
         cx.notify();
     }
@@ -1000,9 +1067,12 @@ impl Disktree {
                 if came_from.is_some() {
                     self.clear_filter();
                     self.root_path.clone_from(&self.scan_root);
-                    self.space = space_info(&self.root_path).ok();
-                    self.device = device_for(&self.root_path);
-                    self.file_table = file_table_readable(&self.root_path);
+                    // Another machine's root says nothing of these disks.
+                    if self.remote.is_none() {
+                        self.space = space_info(&self.root_path).ok();
+                        self.device = device_for(&self.root_path);
+                        self.file_table = file_table_readable(&self.root_path);
+                    }
                 }
                 let metric = self.options.metric;
                 self.marks.refresh(&self.root_path, &node, metric);
@@ -1064,6 +1134,11 @@ impl Disktree {
                 cx.background_executor().timer(interval).await;
                 let ok = this
                     .update(cx, |this, cx| {
+                        // Another machine's path says nothing about this
+                        // machine's disks.
+                        if this.remote.is_some() {
+                            return;
+                        }
                         let path = this.root_path.clone();
                         let fresh = space_info(&path).ok();
                         if fresh != this.space {
@@ -1100,6 +1175,17 @@ impl Disktree {
     pub fn path_at(&self, crumbs: &[usize]) -> Option<PathBuf> {
         let tree = self.tree.as_ref()?;
         Some(path_of(&self.root_path, tree, crumbs))
+    }
+
+    /// `path` as it is shown. Another machine's is written its own way,
+    /// with forward slashes and no `~`: it was joined here, where the
+    /// separator may be `\`, and this machine's home is not its home.
+    pub fn shown_path(&self, path: &Path) -> String {
+        if self.remote.is_some() {
+            path.to_string_lossy().replace('\\', "/")
+        } else {
+            crate::marks::display_path(path, self.home.as_deref())
+        }
     }
 
     /// Path of the directory currently drawn.
@@ -1692,6 +1778,9 @@ impl Disktree {
         crumbs: &[usize],
         cx: &mut Context<'_, Self>,
     ) {
+        if self.read_only("marking", cx) {
+            return;
+        }
         let Some(target) = self.target_at(crumbs) else {
             return;
         };
@@ -2189,6 +2278,11 @@ impl Disktree {
     }
 
     pub fn begin_removal(&mut self, cx: &mut Context<'_, Self>) {
+        // Marking is refused there, so this cannot be reached with marks;
+        // it is refused again here because it is the step that deletes.
+        if self.read_only("removal", cx) {
+            return;
+        }
         let plan = self.plan();
         if plan.is_empty() {
             self.notice = Some(("nothing is marked".into(), Status::Warning));
@@ -2470,6 +2564,10 @@ impl Disktree {
         };
         // "Copy as path" in File Explorer wraps the path in quotes.
         let typed = typed.trim().trim_matches('"').trim();
+        if let Some(remote) = disktree_core::remote::Remote::parse(typed) {
+            self.set_remote(remote, cx);
+            return true;
+        }
         let Some(path) = typed_path(typed, self.home.as_deref()) else {
             cx.notify();
             return refuse(
@@ -2659,6 +2757,9 @@ impl Disktree {
 
     /// Show the tile a key acts on in Finder (or the file manager), selected.
     pub fn reveal_target(&mut self, cx: &mut Context<'_, Self>) {
+        if self.read_only("the file manager", cx) {
+            return;
+        }
         let crumbs =
             self.action_target().unwrap_or_else(|| self.crumbs.clone());
         let Some(path) = self.path_at(&crumbs) else {

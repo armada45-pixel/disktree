@@ -1938,3 +1938,65 @@ fn the_power_menu_offers_only_what_the_cpus_can_tell_apart(
     draw(cx);
     assert!(read(&view, cx, |app| app.power_menu.is_none()));
 }
+
+/// Another machine's tree is on screen to be read. Nothing that would
+/// act on one of its paths as though it were this machine's is offered,
+/// and what is pressed anyway says why not.
+#[gpui_kit::test]
+fn another_machine_is_looked_at_and_never_acted_on(cx: &mut TestAppContext) {
+    use disktree_core::remote::Remote;
+
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    update(&view, cx, Disktree::toggle_mark_selected);
+    assert_eq!(read(&view, cx, |app| app.marks.len()), 1);
+    assert!(cx.debug_bounds("mark-button").is_some());
+    assert!(cx.debug_bounds("key-mark").is_some());
+    assert!(cx.debug_bounds("key-review").is_some());
+
+    // Stand in for a scan of another machine: the tree on screen with a
+    // remote set, as it is once a listing lands. Nothing is connected to.
+    update(&view, cx, |app, cx| {
+        app.remote = Remote::parse("me@box:/srv/data");
+        app.marks.clear();
+        cx.notify();
+    });
+    draw(cx);
+    // Its paths read as its own, whatever this machine joins them with,
+    // and nothing offers to mark one.
+    read(&view, cx, |app| {
+        let inside = app.root_path.join("srv").join("data");
+        assert_eq!(app.shown_path(&inside), {
+            let root = app.root_path.to_string_lossy().replace('\\', "/");
+            format!("{root}/srv/data")
+        });
+        assert_eq!(crate::widgets::display_root(app), "me@box:/srv/data");
+    });
+    assert!(cx.debug_bounds("mark-button").is_none());
+    assert!(cx.debug_bounds("key-mark").is_none());
+    assert!(cx.debug_bounds("key-review").is_none());
+    assert!(cx.debug_bounds("key-open").is_some());
+    // Marking says why not, and marks nothing; so does the file manager.
+    press(cx, "space");
+    read(&view, cx, |app| {
+        assert!(app.marks.is_empty());
+        let (text, _) = app.notice.as_ref().expect("a reason");
+        assert!(text.contains("read-only"), "{text}");
+    });
+    update(&view, cx, |app, cx| {
+        app.notice = None;
+        app.reveal_target(cx);
+        assert!(app.notice.is_some());
+        app.begin_removal(cx);
+        assert_eq!(app.screen, Screen::Explore);
+    });
+    // A local root is a local scan again, with everything it allows.
+    let root = temp.path().to_path_buf();
+    update(&view, cx, |app, cx| app.set_root(root, cx));
+    assert!(read(&view, cx, |app| app.remote.is_none()));
+    finish_scan(&view, cx);
+    press(cx, "space");
+    assert_eq!(read(&view, cx, |app| app.marks.len()), 1);
+}
