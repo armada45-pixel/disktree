@@ -2196,50 +2196,141 @@ fn the_page_of_disks_scans_the_one_clicked(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn the_filter_menu_narrows_by_size_and_kind(cx: &mut TestAppContext) {
+    use disktree_core::classify::Category;
+
     cx.update(gpui_omarchy::init);
     let temp = fixture();
     let (view, cx) = view_over(temp.path(), cx);
     draw(cx);
+    let click = |cx: &mut Window, selector: &'static str| {
+        let at = cx.debug_bounds(selector).expect(selector);
+        cx.simulate_click(at.center(), gpui_kit::Modifiers::none());
+        draw(cx);
+    };
 
-    let button = cx.debug_bounds("filter-control").expect("the button");
-    cx.simulate_click(button.center(), gpui_kit::Modifiers::none());
-    draw(cx);
+    click(cx, "filter-control");
     assert!(read(&view, cx, |app| app.filter_menu));
     assert!(
         cx.debug_bounds("filter-menu").is_some(),
         "the menu is drawn"
     );
-    press(cx, "escape");
-    assert!(!read(&view, cx, |app| app.filter_menu));
 
-    // Files of 150 KiB and more: the two blobs, not the third or the note.
-    update(&view, cx, |app, cx| app.filter_size(Some("150k"), cx));
+    // Kinds are ticked, any number of them, and the menu stays for more.
+    click(cx, "filter-kind-media");
+    click(cx, "filter-kind-cache");
+    read(&view, cx, |app| {
+        assert_eq!(app.filter_kinds, [Category::Media, Category::Cache]);
+        assert!(app.filter_menu);
+        // The name field is not where these are kept.
+        assert!(app.find.is_empty());
+    });
+    click(cx, "filter-kind-media");
+    click(cx, "filter-kind-cache");
+    assert!(read(&view, cx, |app| app.filter_kinds.is_empty()));
+
+    // A least and a most, typed, in the unit picked: 150 to 250 KiB is
+    // the one 200 KiB blob, not the 300 KiB one or the 100 KiB one.
+    let (least, most) =
+        read(&view, cx, |app| app.size_inputs.clone()).expect("the fields");
+    cx.update(|window, cx| {
+        least.update(cx, |field, cx| field.set_value("150", window, cx));
+        most.update(cx, |field, cx| field.set_value("250", window, cx));
+    });
+    click(cx, "filter-unit-0");
     cx.run_until_parked();
     draw(cx);
     read(&view, cx, |app| {
+        assert_eq!(app.filter_least, Some(150 << 10));
+        assert_eq!(app.filter_most, Some(250 << 10));
         let matches = app.matches.as_ref().expect("a filter");
-        assert_eq!(matches.count, 2);
-        assert_eq!(matches.bytes, 500_000);
+        assert_eq!((matches.count, matches.bytes), (1, 200_000));
         assert!(app.filter_applied);
     });
-    // A kind beside it keeps the size; nothing here is media that large.
-    update(&view, cx, |app, cx| {
-        app.filter_kind(Some(disktree_core::classify::Category::Media), cx);
+
+    // Not a number, or the wrong way round: said, and nothing changes.
+    cx.update(|window, cx| {
+        least.update(cx, |field, cx| field.set_value("lots", window, cx));
+    });
+    update(&view, cx, Disktree::apply_sizes);
+    read(&view, cx, |app| {
+        assert!(app.notice.is_some());
+        assert_eq!(app.filter_least, Some(150 << 10));
+    });
+
+    // Escape closes the menu and leaves the filter; Clear lifts it.
+    press(cx, "escape");
+    read(&view, cx, |app| {
+        assert!(!app.filter_menu);
+        assert!(app.filter_chosen());
+    });
+    cx.update(|window, cx| {
+        view.update(cx, |app, cx| app.clear_chosen_filter(window, cx));
     });
     cx.run_until_parked();
-    draw(cx);
     read(&view, cx, |app| {
-        assert_eq!(app.find, ">150k kind:media");
-        assert_eq!(app.matches.as_ref().map(|found| found.count), Some(0));
-    });
-    // Taking both off again is no filter at all.
-    update(&view, cx, |app, cx| app.filter_kind(None, cx));
-    update(&view, cx, |app, cx| app.filter_size(None, cx));
-    cx.run_until_parked();
-    read(&view, cx, |app| {
-        assert!(app.find.is_empty());
+        assert!(!app.filter_chosen());
         assert!(app.matches.is_none());
     });
+}
+
+#[gpui_kit::test]
+fn the_name_filter_has_a_button_of_its_own(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    let name = cx.debug_bounds("filter-name").expect("the Name button");
+    cx.simulate_click(name.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    read(&view, cx, |app| {
+        assert!(app.find_open);
+        assert!(!app.filter_menu);
+    });
+    // What is typed is the name, and only the name.
+    press(cx, "b l o b");
+    read(&view, cx, |app| {
+        assert_eq!(app.find, "blob");
+        assert!(!app.filter_chosen());
+    });
+}
+
+#[gpui_kit::test]
+fn the_settings_page_changes_the_theme_and_names_the_build(
+    cx: &mut TestAppContext,
+) {
+    use crate::appearance::ThemeChoice;
+    use gpui_kit::base::ThemeAppearance;
+    use gpui_omarchy::ActiveTheme as _;
+
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    let click = |cx: &mut Window, selector: &'static str| {
+        let at = cx.debug_bounds(selector).expect(selector);
+        cx.simulate_click(at.center(), gpui_kit::Modifiers::none());
+        draw(cx);
+    };
+    click(cx, "settings");
+    assert!(cx.debug_bounds("about").is_some(), "version and build");
+
+    // Each button puts its theme in force, and the page stays open.
+    for (selector, choice, appearance) in [
+        ("theme-light", ThemeChoice::Light, ThemeAppearance::Light),
+        ("theme-dark", ThemeChoice::Dark, ThemeAppearance::Dark),
+        ("theme-light", ThemeChoice::Light, ThemeAppearance::Light),
+    ] {
+        click(cx, selector);
+        read(&view, cx, |app| {
+            assert_eq!(app.theme_choice, choice);
+            assert!(app.settings_open);
+        });
+        cx.update(|_, cx| assert_eq!(cx.omarchy().appearance, appearance));
+    }
+    // And the key agrees with the buttons about which one is on.
+    press(cx, "escape");
+    press(cx, "shift-t");
+    assert_eq!(read(&view, cx, |app| app.theme_choice), ThemeChoice::Dark);
 }
 
 #[gpui_kit::test]

@@ -2,6 +2,8 @@
 fn main() {
     use std::{env, fs, path::PathBuf, process::Command};
 
+    build_number();
+
     let icon = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
         .join("../../assets/disktree.ico")
         .canonicalize()
@@ -62,4 +64,32 @@ fn main() {
 }
 
 #[cfg(not(windows))]
-fn main() {}
+fn main() {
+    build_number();
+}
+
+/// Which build this is, for the settings page: the number of commits it
+/// was built from and the last one's short name, `412.6c8d4ce`. A build
+/// from a source archive has no history to count and says so.
+fn build_number() {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty())
+    };
+    let build = git(&["rev-list", "--count", "HEAD"])
+        .zip(git(&["rev-parse", "--short", "HEAD"]))
+        .map_or_else(
+            || "unknown".to_owned(),
+            |(count, commit)| format!("{count}.{commit}"),
+        );
+    println!("cargo:rustc-env=DISKTREE_BUILD={build}");
+    // Every commit, checkout and merge appends here, so the number is
+    // never left over from an older one.
+    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
+}
