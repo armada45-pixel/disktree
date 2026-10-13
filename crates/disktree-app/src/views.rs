@@ -1048,7 +1048,7 @@ fn trail(app: &Disktree, theme: &Theme, cx: &Context<'_, Disktree>) -> Div {
     for (index, (label, step)) in steps.into_iter().enumerate() {
         if hidden.contains(&index) {
             if index == hidden.start {
-                row = row.child(separator_glyph(theme)).child(
+                row = row.child(separator_glyph(app, theme)).child(
                     div()
                         .px(space::XS)
                         .text_color(theme.secondary.opacity(0.6))
@@ -1059,7 +1059,7 @@ fn trail(app: &Disktree, theme: &Theme, cx: &Context<'_, Disktree>) -> Div {
         }
         // The root is its own separator: "/" then "home", not "/ / home".
         if index > 1 {
-            row = row.child(separator_glyph(theme));
+            row = row.child(separator_glyph(app, theme));
         }
         let id = ElementId::Name(SharedString::from(format!("crumb-{index}")));
         let crumb = match step {
@@ -1092,12 +1092,17 @@ fn trail(app: &Disktree, theme: &Theme, cx: &Context<'_, Disktree>) -> Div {
 const TRAIL_STEPS: usize = 7;
 
 /// The platform's path separator, so the trail reads like the paths shown
-/// elsewhere: `/` here, `\` on Windows.
-fn separator_glyph(theme: &Theme) -> Div {
+/// elsewhere: `/` here, `\` on Windows. Another machine's paths are
+/// listed by `find`, and are always `/`.
+fn separator_glyph(app: &Disktree, theme: &Theme) -> Div {
     div()
         .text_color(theme.secondary.opacity(0.5))
         .text_size(text::BODY)
-        .child(std::path::MAIN_SEPARATOR_STR)
+        .child(if app.remote.is_some() {
+            "/"
+        } else {
+            std::path::MAIN_SEPARATOR_STR
+        })
 }
 
 /// A crumb in the tree. Its label goes there (the current one opens the
@@ -1211,7 +1216,7 @@ fn sibling_menu(
     let largest = rows.first().map_or(1, |row| row.value.max(1));
     let parent_name = app.node_at(parent).map_or_else(String::new, |node| {
         if parent.is_empty() {
-            crate::marks::display_path(&app.root_path, app.home.as_deref())
+            app.shown_path(&app.root_path)
         } else {
             node.name.to_string()
         }
@@ -2511,9 +2516,10 @@ fn selection_section(
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .text_ellipsis()
-                .child(path.as_deref().map_or_else(String::new, |path| {
-                    crate::marks::display_path(path, app.home.as_deref())
-                })),
+                .child(
+                    path.as_deref()
+                        .map_or_else(String::new, |path| app.shown_path(path)),
+                ),
         );
 
     let (number, unit) = match app.options.metric {
@@ -2649,6 +2655,7 @@ fn selection_section(
             _ => "Mark for removal".to_string(),
         };
         let mark = button("mark", label, ButtonVariant::Primary, cx)
+            .debug_selector(|| "mark-button".into())
             .tab_stop(false)
             .flex_1()
             .justify_center()
@@ -2662,18 +2669,25 @@ fn selection_section(
                 window.focus(&this.focus, cx);
             }));
         let filled = !marked && covered_by.is_none();
-        actions = actions.child(if filled {
-            let on = palette::on_highlight(theme);
-            mark.bg(highlight)
-                .border_color(highlight)
-                .text_color(on)
-                .font_weight(FontWeight::SEMIBOLD)
-                .hover(move |style| {
-                    style.bg(highlight.opacity(0.85)).border_color(highlight)
-                })
-        } else {
-            mark
-        });
+        // Nothing is marked on another machine, so marking is not offered
+        // there; pressed, it could only say no.
+        let offered = app.remote.is_none();
+        actions = actions.children(offered.then(|| {
+            if filled {
+                let on = palette::on_highlight(theme);
+                mark.bg(highlight)
+                    .border_color(highlight)
+                    .text_color(on)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .hover(move |style| {
+                        style
+                            .bg(highlight.opacity(0.85))
+                            .border_color(highlight)
+                    })
+            } else {
+                mark
+            }
+        }));
     }
 
     section
@@ -3003,7 +3017,11 @@ fn privacy_line(
     theme: &Theme,
     cx: &Context<'_, Disktree>,
 ) -> Option<Div> {
-    if app.progress.errors == 0 || app.full_disk_access != Some(false) {
+    // What another machine kept back is not this one's access to grant.
+    if app.remote.is_some()
+        || app.progress.errors == 0
+        || app.full_disk_access != Some(false)
+    {
         return None;
     }
     let color = theme.warning;
@@ -3056,7 +3074,13 @@ fn administrator_line(
     theme: &Theme,
     cx: &Context<'_, Disktree>,
 ) -> Option<Div> {
-    if app.administrator != Some(false) || app.restarting || app.run.is_some() {
+    // Nor would an administrator here read what another machine kept
+    // back, or its disk from a file table.
+    if app.remote.is_some()
+        || app.administrator != Some(false)
+        || app.restarting
+        || app.run.is_some()
+    {
         return None;
     }
     let errors = app.progress.errors;
@@ -4570,9 +4594,10 @@ fn node_card(
             div()
                 .text_size(text::CAPTION)
                 .text_color(theme.secondary)
-                .child(path.as_deref().map_or_else(String::new, |path| {
-                    crate::marks::display_path(path, app.home.as_deref())
-                })),
+                .child(
+                    path.as_deref()
+                        .map_or_else(String::new, |path| app.shown_path(path)),
+                ),
         )
         .child(
             div()

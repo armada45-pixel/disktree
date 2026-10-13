@@ -2026,6 +2026,17 @@ impl Disktree {
         Some(path_of(&self.root_path, tree, crumbs))
     }
 
+    /// `path` as it is shown. Another machine's is written its own way,
+    /// with forward slashes and no `~`: it was joined here, where the
+    /// separator may be `\`, and this machine's home is not its home.
+    pub fn shown_path(&self, path: &Path) -> String {
+        if self.remote.is_some() {
+            path.to_string_lossy().replace('\\', "/")
+        } else {
+            crate::marks::display_path(path, self.home.as_deref())
+        }
+    }
+
     /// Path of the directory currently drawn.
     pub fn current_path(&self) -> PathBuf {
         self.path_at(&self.crumbs)
