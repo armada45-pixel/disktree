@@ -78,12 +78,16 @@ impl Query {
 
     fn matches(&self, node: &Node) -> bool {
         let sized = self.min_bytes.is_some() || self.max_bytes.is_some();
-        (self.name.is_empty() || contains_ignoring_case(&node.name, &self.name))
-            && (self.kinds.is_empty() || self.kinds.contains(&node.category))
+        // The name last: a kind is one comparison and a size two, where
+        // a name is a search through every byte of it, and this runs for
+        // every node of a tree that may hold millions.
+        (self.kinds.is_empty() || self.kinds.contains(&node.category))
             && (!sized
                 || (!node.is_dir()
                     && self.min_bytes.is_none_or(|least| node.bytes >= least)
                     && self.max_bytes.is_none_or(|most| node.bytes <= most)))
+            && (self.name.is_empty()
+                || contains_ignoring_case(&node.name, &self.name))
     }
 }
 
@@ -150,6 +154,11 @@ pub struct Matches {
     /// Keyed by absolute crumbs. Only matches and their ancestors appear;
     /// a match's own descendants are implied.
     pub keep: FxHashMap<Vec<usize>, Keep>,
+    /// The largest of the matches, by bytes, and where it is: what a
+    /// filtered view selects. Found during the search, which is off the
+    /// UI thread, so that showing the matches need not walk every one of
+    /// them on it.
+    pub largest: Option<(u64, Vec<usize>)>,
     /// Topmost matches: a match inside a match is not counted again.
     pub count: usize,
     pub bytes: u64,
@@ -227,6 +236,13 @@ fn visit(
         if matches.query.matches(child) {
             matches.keep.insert(crumbs.clone(), Keep::Whole);
             matches.count += 1;
+            if matches
+                .largest
+                .as_ref()
+                .is_none_or(|(bytes, _)| child.bytes > *bytes)
+            {
+                matches.largest = Some((child.bytes, crumbs.clone()));
+            }
             // Saturating, as `tree::aggregate` is: a corrupt volume's
             // file table can claim any size.
             total.0 = child.bytes.saturating_add(total.0);
@@ -256,11 +272,17 @@ fn contains_ignoring_case(haystack: &str, lower_needle: &str) -> bool {
     if needle.len() > hay.len() {
         return false;
     }
-    hay.windows(needle.len()).any(|window| {
-        window
-            .iter()
-            .zip(needle)
-            .all(|(left, right)| left.to_ascii_lowercase() == *right)
+    // Most offsets fail on their first byte, so that byte is looked for
+    // on its own, in either case, and only a hit is compared in full.
+    let (first, rest) = (needle[0], &needle[1..]);
+    let upper = first.to_ascii_uppercase();
+    let last_start = hay.len() - needle.len();
+    hay[..=last_start].iter().enumerate().any(|(at, byte)| {
+        (*byte == first || *byte == upper)
+            && hay[at + 1..at + needle.len()]
+                .iter()
+                .zip(rest)
+                .all(|(left, right)| left.to_ascii_lowercase() == *right)
     })
 }
 
@@ -342,6 +364,52 @@ mod tests {
         // Both together: the large file of that kind alone.
         let both = filter(&root, &[], "kind:cache >30").expect("both");
         assert_eq!((both.count, both.bytes), (1, 40));
+    }
+
+    #[test]
+    fn the_largest_match_is_found_with_the_matches() {
+        let mut root = dir(
+            "root",
+            vec![
+                dir("a", vec![file("blob-small", 5), file("other", 900)]),
+                file("blob-big", 70),
+                dir("blob-dir", vec![file("x", 40)]),
+            ],
+        );
+        aggregate(&mut root, Metric::Bytes);
+        let found = filter(&root, &[], "blob").expect("matches");
+        let (bytes, crumbs) = found.largest.expect("a largest");
+        assert_eq!(bytes, 70);
+        assert_eq!(
+            root.resolve(&crumbs).map(|node| node.name.as_ref()),
+            Some("blob-big")
+        );
+        assert!(filter(&root, &[], "zzz").expect("none").largest.is_none());
+    }
+
+    #[test]
+    fn a_name_is_found_wherever_it_starts_and_whatever_its_case() {
+        for (hay, needle, found) in [
+            ("Makefile", "make", true),
+            ("Makefile", "file", true),
+            ("Makefile", "kef", true),
+            ("MAKEFILE", "akef", true),
+            ("aab", "ab", true),
+            ("ababac", "abac", true),
+            ("Makefile", "files", false),
+            ("Makefile", "mk", false),
+            ("a", "ab", false),
+            ("", "a", false),
+            ("anything", "", true),
+            ("naïve.txt", "ïve", true),
+            ("x_1", "_1", true),
+        ] {
+            assert_eq!(
+                contains_ignoring_case(hay, needle),
+                found,
+                "{needle} in {hay}"
+            );
+        }
     }
 
     fn tree() -> Node {

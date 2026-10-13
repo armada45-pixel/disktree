@@ -204,7 +204,10 @@ pub(crate) fn scan(
     });
     let name = remote.path.rsplit('/').next().unwrap_or_default();
     let name = if name.is_empty() { "/" } else { name };
-    let tree = read_listing(BufReader::new(stdout), name, options, progress);
+    // A listing is tens of megabytes of short records: a buffer the size
+    // of a pipe's own saves a read from it for every few dozen of them.
+    let listing = BufReader::with_capacity(1 << 16, stdout);
+    let tree = read_listing(listing, name, options, progress);
     if progress.is_cancelled() {
         let _ = child.kill();
     }

@@ -3412,17 +3412,10 @@ impl Disktree {
         self.transition = None;
         self.forget_hover();
         self.pointer_active = false;
-        let tree = self.tree.clone();
-        self.selected = matches
-            .keep
-            .iter()
-            .filter(|(_, keep)| **keep == Keep::Whole)
-            .filter_map(|(crumbs, _)| {
-                let node = tree.as_deref()?.resolve(crumbs)?;
-                Some((node.bytes, crumbs))
-            })
-            .max_by_key(|(bytes, _)| *bytes)
-            .map(|(_, crumbs)| crumbs.clone());
+        // The search already knows its largest match; resolving every
+        // match here, on the UI thread, was a pause that grew with them.
+        self.selected =
+            matches.largest.as_ref().map(|(_, crumbs)| crumbs.clone());
         self.notice = None;
         cx.notify();
     }
