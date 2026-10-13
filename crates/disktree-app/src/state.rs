@@ -520,6 +520,9 @@ pub struct Disktree {
     /// least then the most: an index into [`size_units`]. Each has its
     /// own, so "from 500 MiB to 4 GiB" is typed as it is said.
     pub size_unit: [usize; 2],
+    /// The dropdowns those units are picked from, built each time the
+    /// menu opens so they list the units the setting then asks for.
+    pub unit_selects: Option<[Entity<gpui_omarchy::ChoiceState>; 2]>,
     /// What is wrong with a typed size and which field it is in, the
     /// least (`0`) or the most (`1`): said beside that field, in words,
     /// until it is put right.
@@ -646,6 +649,7 @@ impl Disktree {
             filter_most: None,
             // Megabytes: the unit most "large files" are counted in.
             size_unit: [1, 1],
+            unit_selects: None,
             size_error: None,
             remote: None,
             ssh_input: None,
@@ -1181,6 +1185,38 @@ impl Disktree {
             (least, most)
         };
         let units = self.size_unit;
+        self.unit_selects = Some([0, 1].map(|side| {
+            let select = cx.new(|cx| {
+                gpui_omarchy::ChoiceState::new(
+                    size_units()
+                        .into_iter()
+                        .map(|unit| gpui_omarchy::ChoiceItem::new(unit, unit))
+                        .collect(),
+                    window,
+                    cx,
+                )
+                .label(if side == 0 {
+                    "Unit of the min size"
+                } else {
+                    "Unit of the max size"
+                })
+                .default_selected(units[side])
+            });
+            cx.observe(&select, move |this, select, cx| {
+                let picked = select.read(cx).selected().and_then(|item| {
+                    size_units()
+                        .into_iter()
+                        .position(|unit| unit == item.value.as_ref())
+                });
+                if let Some(unit) = picked
+                    && unit != this.size_unit[side]
+                {
+                    this.set_size_unit(side, unit, cx);
+                }
+            })
+            .detach();
+            select
+        }));
         for (input, bytes, unit) in [
             (&least, self.filter_least, units[0]),
             (&most, self.filter_most, units[1]),
@@ -1230,7 +1266,42 @@ impl Disktree {
         unit: usize,
         cx: &mut Context<'_, Self>,
     ) {
-        self.size_unit[side.min(1)] = unit.min(size_units().len() - 1);
+        let side = side.min(1);
+        let unit = unit.min(size_units().len() - 1);
+        self.size_unit[side] = unit;
+        // The dropdown shows it too, when this did not come from there.
+        if let Some(selects) = &self.unit_selects {
+            let select = selects[side].clone();
+            let shown = select
+                .read(cx)
+                .selected()
+                .is_some_and(|item| item.value.as_ref() == size_units()[unit]);
+            if !shown {
+                select.update(cx, |state, cx| {
+                    state.set_selected(Some(unit), cx);
+                });
+            }
+        }
+        self.apply_sizes(cx);
+    }
+
+    /// Empty one size field, the least (`0`) or the most (`1`), and lift
+    /// that limit at once: the cross in a field is an action, not an
+    /// edit waiting for Apply.
+    pub fn clear_size(
+        &mut self,
+        side: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some((least, most)) = self.size_inputs.clone() else {
+            return;
+        };
+        let input = if side == 0 { least } else { most };
+        input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+            state.focus(window, cx);
+        });
         self.apply_sizes(cx);
     }
 
@@ -3529,7 +3600,11 @@ impl Disktree {
         // The Filter menu has fields to type sizes in, so keys are text
         // there too.
         if self.filter_menu {
-            if key == "escape" {
+            // An open dropdown takes Escape for itself first.
+            let picking = self.unit_selects.as_ref().is_some_and(|selects| {
+                selects.iter().any(|select| select.read(cx).is_open())
+            });
+            if key == "escape" && !picking {
                 self.close_filter_menu(cx);
             }
             return;
