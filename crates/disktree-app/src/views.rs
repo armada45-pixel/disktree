@@ -111,6 +111,9 @@ pub fn root(
     if app.show_help {
         root = root.child(help_overlay(app, cx));
     }
+    if app.home_open {
+        root = root.child(home_page(app, cx));
+    }
     if app.volumes_open {
         root = root.child(volumes_dialog(app, cx));
     }
@@ -250,7 +253,7 @@ fn centred_popup(
         )
 }
 
-/// A page over the dimmed window: the keys, for one. A press outside the
+/// A page over the dimmed window: the keys, the disks. A press outside the
 /// card closes it, as Escape does; one on the card is the card's own, and
 /// nothing reaches the screen behind either way.
 fn modal(
@@ -326,6 +329,191 @@ fn page_header(
                     window.focus(&this.focus, cx);
                 })),
         )
+}
+
+/// A volume as a file manager names it: its label, then where it is
+/// mounted, `Data (D:)`; or the mount point alone when it has no label.
+fn volume_name(volume: &disktree_core::space::Volume) -> String {
+    let point = volume.point.display().to_string();
+    match &volume.label {
+        Some(label) => {
+            let short = point.trim_end_matches(['\\', '/']);
+            let short = if short.is_empty() { &point } else { short };
+            format!("{label} ({short})")
+        }
+        None => point,
+    }
+}
+
+/// How much room a volume has, of how much: `23 GiB free of 317 GiB`.
+fn volume_room(volume: &disktree_core::space::Volume) -> String {
+    volume.space.map_or_else(
+        || "size unknown".to_string(),
+        |space| {
+            format!(
+                "{} free of {}",
+                human_bytes(space.available),
+                human_bytes(space.total)
+            )
+        },
+    )
+}
+
+/// How full a volume has to be before its bar turns to the danger colour,
+/// the way a file manager warns that a drive is nearly out of room.
+const NEARLY_FULL: f32 = 0.9;
+
+/// Every disk, as the first page of a file manager shows them: name, a bar
+/// of what is used, and the room left. A click scans that one.
+fn home_page(app: &Disktree, cx: &Context<'_, Disktree>) -> Stateful<Div> {
+    let theme = cx.omarchy().clone();
+    let close: fn(&mut Disktree, &mut Context<'_, Disktree>) =
+        Disktree::close_home;
+    let mut drives = div()
+        .id("home-drives")
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(space::LG);
+    if app.volumes_loading {
+        drives = drives.child(
+            div()
+                .text_color(theme.secondary)
+                .child("Looking for disks\u{2026}"),
+        );
+    } else if app.volumes.is_empty() {
+        drives = drives.child(
+            div()
+                .text_color(theme.secondary)
+                .child("No disk could be read."),
+        );
+    }
+    for (index, volume) in app.volumes.iter().enumerate() {
+        let highlighted = index == app.volume_highlight;
+        let scanned = app.root_path.starts_with(&volume.point);
+        let used = volume.space.map_or(0.0, |space| {
+            (space.used() as f32 / space.total.max(1) as f32).clamp(0.0, 1.0)
+        });
+        let fill = if used >= NEARLY_FULL {
+            theme.danger
+        } else {
+            theme.accent
+        };
+        drives = drives.child(
+            div()
+                .id(ElementId::Name(format!("drive-{index}").into()))
+                .debug_selector(move || format!("drive-{index}"))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space::MD)
+                .w(size::DRIVE_CARD)
+                .p(space::MD)
+                .border_1()
+                .border_color(if highlighted {
+                    theme.accent
+                } else {
+                    theme.control_border()
+                })
+                .when(highlighted, |card| card.bg(theme.accent.opacity(0.12)))
+                .hover(|card| card.bg(theme.hover_fill()))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.volume_highlight = index;
+                    this.choose_volume(cx);
+                    window.focus(&this.focus, cx);
+                }))
+                .child(
+                    gpui_omarchy::icon(gpui_omarchy::IconName::HardDrive)
+                        .size(icon::LG)
+                        .text_color(theme.secondary),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(space::XS)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(space::SM)
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(text::BODY)
+                                        .text_color(theme.bright)
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(volume_name(volume)),
+                                )
+                                .when(scanned, |row| {
+                                    row.child(widgets::chip(
+                                        "scanned",
+                                        theme.accent,
+                                        cx,
+                                    ))
+                                }),
+                        )
+                        .child(widgets::bar(used, fill, cx))
+                        .child(
+                            div()
+                                .text_size(text::CAPTION)
+                                .text_color(theme.secondary)
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(volume_room(volume)),
+                        )
+                        // Where a volume has no label, as on Linux, its
+                        // device is what tells two apart. On a line of its
+                        // own: beside the room it pushed the total out of
+                        // the card.
+                        .children(volume.device.clone().map(|device| {
+                            div()
+                                .text_size(text::CAPTION)
+                                .text_color(theme.secondary.opacity(0.7))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(device)
+                        })),
+                ),
+        );
+    }
+    let card = div()
+        .flex()
+        .flex_col()
+        .gap(space::LG)
+        .w(size::HOME)
+        .max_w(relative(0.94))
+        .p(space::XL)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface)
+        .child(page_header(
+            "home-close",
+            gpui_omarchy::IconName::HardDrive,
+            "Disks",
+            close,
+            cx,
+        ))
+        .child(drives)
+        .child(
+            div()
+                .text_size(text::CAPTION)
+                .text_color(theme.secondary)
+                .child(
+                    "Click a disk to scan it \u{00b7} up, down and enter work \
+                     too \u{00b7} esc stays here",
+                ),
+        );
+    modal("home", &theme, card, close, cx)
 }
 
 /// The one question disktree asks: a permanent deletion cannot be undone, so
@@ -536,10 +724,33 @@ fn top_bar(
         .border_b_1()
         .border_color(theme.divider())
         .child(logo(theme))
+        .child(with_tooltip(
+            bar_icon("home", gpui_omarchy::IconName::HardDrive, theme)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_home(cx);
+                    window.focus(&this.focus, cx);
+                })),
+            "Every disk, to scan another",
+        ))
         // Where you are is navigation, and it belongs to the whole window.
         .child(trail(app, theme, cx))
         .child(div().flex_1())
         .child(view_settings(app, window, cx))
+}
+
+/// A glyph on the bar that does one thing when clicked.
+fn bar_icon(
+    id: &'static str,
+    name: gpui_omarchy::IconName,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .p(space::XS)
+        .text_color(theme.secondary)
+        .hover(|style| style.bg(theme.hover_fill()).text_color(theme.bright))
+        .child(gpui_omarchy::icon(name).size(icon::MD))
 }
 
 /// The trail, from `/`. Above the scanned root, a crumb widens the scan;
