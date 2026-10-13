@@ -2619,6 +2619,7 @@ fn another_machine_is_looked_at_and_never_acted_on(cx: &mut TestAppContext) {
     draw(cx);
     update(&view, cx, Disktree::toggle_mark_selected);
     assert_eq!(read(&view, cx, |app| app.marks.len()), 1);
+    assert!(cx.debug_bounds("mark-button").is_some());
 
     // The page of disks has the address field; nonsense is said, not tried.
     let home = cx.debug_bounds("home").expect("the home button");
@@ -2643,6 +2644,16 @@ fn another_machine_is_looked_at_and_never_acted_on(cx: &mut TestAppContext) {
         cx.notify();
     });
     draw(cx);
+    // Its paths read as its own, whatever this machine joins them with,
+    // and nothing offers to mark one or to restart as an administrator.
+    read(&view, cx, |app| {
+        let inside = app.root_path.join("srv").join("data");
+        assert_eq!(app.shown_path(&inside), {
+            let root = app.root_path.to_string_lossy().replace('\\', "/");
+            format!("{root}/srv/data")
+        });
+    });
+    assert!(cx.debug_bounds("mark-button").is_none());
     // Marking says why not, and marks nothing; so does the file manager.
     press(cx, "space");
     read(&view, cx, |app| {
