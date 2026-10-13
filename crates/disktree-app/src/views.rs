@@ -474,16 +474,21 @@ fn home_page(
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                // Where a volume has no label, as on Linux,
-                                // its device is what tells two apart.
-                                .child(match &volume.device {
-                                    Some(device) => format!(
-                                        "{device} \u{00b7} {}",
-                                        volume_room(volume)
-                                    ),
-                                    None => volume_room(volume),
-                                }),
-                        ),
+                                .child(volume_room(volume)),
+                        )
+                        // Where a volume has no label, as on Linux, its
+                        // device is what tells two apart. On a line of its
+                        // own: beside the room it pushed the total out of
+                        // the card.
+                        .children(volume.device.clone().map(|device| {
+                            div()
+                                .text_size(text::CAPTION)
+                                .text_color(theme.secondary.opacity(0.7))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(device)
+                        })),
                 ),
         );
     }
