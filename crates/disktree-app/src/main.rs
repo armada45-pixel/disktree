@@ -18,6 +18,7 @@ mod marks;
 mod palette;
 mod power;
 mod settings;
+mod shortcut;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -285,6 +286,11 @@ fn parse_args_with(
     };
     let mut power = Some(preset);
     let mut depth = saved.depth;
+    let deepest = if saved.deep_levels {
+        state::DEEP_LEVELS
+    } else {
+        state::USUAL_LEVELS
+    };
     let mut disk = false;
     let mut cli = false;
     // `std::env::args` panics on a name that is not Unicode, and a path is
@@ -315,8 +321,8 @@ fn parse_args_with(
                 let value = text(args.next(), "--depth needs a number")?;
                 depth = value.parse().context("--depth needs a number")?;
                 anyhow::ensure!(
-                    (1..=6).contains(&depth),
-                    "--depth must be 1 to 6"
+                    (1..=deepest).contains(&depth),
+                    "--depth must be 1 to {deepest}"
                 );
             }
             "--power-efficiency" => {
@@ -422,7 +428,7 @@ fn parse_args_with(
     Ok(Args {
         root,
         options,
-        depth: depth.clamp(1, 6),
+        depth: depth.clamp(1, deepest),
         power,
         cli,
     })

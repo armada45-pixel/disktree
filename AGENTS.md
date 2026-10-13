@@ -123,6 +123,8 @@ and `cargo build --release` directly; CI runs the gate on both systems.
 | a key, a screen transition, a mark | `crates/disktree-app/src/state.rs` |
 | a view choice kept between launches | `crates/disktree-app/src/settings.rs` |
 | which theme is in force | `crates/disktree-app/src/appearance.rs` |
+| a Start menu or desktop shortcut, on Windows | `crates/disktree-app/src/shortcut.rs` |
+| what a filter matches: name, kind, size | `crates/disktree-core/src/filter.rs` |
 | spacing, type and size | `crates/disktree-app/src/ui.rs` — tokens only, no `px` in layout |
 | the mosaic's painting or labels | `crates/disktree-app/src/treemap_view.rs` |
 | layout of a screen | `crates/disktree-app/src/views.rs` |

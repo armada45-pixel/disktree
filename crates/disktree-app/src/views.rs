@@ -114,6 +114,12 @@ pub fn root(
     if app.show_help {
         root = root.child(help_overlay(app, cx));
     }
+    if app.home_open {
+        root = root.child(home_page(app, cx));
+    }
+    if app.settings_open {
+        root = root.child(settings_page(app, window, cx));
+    }
     if app.volumes_open {
         root = root.child(volumes_dialog(app, cx));
     }
@@ -145,16 +151,13 @@ fn volumes_dialog(
     }
     for (index, volume) in app.volumes.iter().enumerate() {
         let highlighted = index == app.volume_highlight;
-        let free = volume.space.map_or_else(
-            || "unknown free".to_string(),
-            |space| format!("{} free", human_bytes(space.available)),
-        );
+        let name = volume_name(volume);
+        let room = volume_room(volume);
         let label = match &volume.device {
-            Some(device) => format!(
-                "{}  \u{00b7}  {device}  \u{00b7}  {free}",
-                volume.point.display()
-            ),
-            None => format!("{}  \u{00b7}  {free}", volume.point.display()),
+            Some(device) => {
+                format!("{name}  \u{00b7}  {device}  \u{00b7}  {room}")
+            }
+            None => format!("{name}  \u{00b7}  {room}"),
         };
         rows = rows.child(
             div()
@@ -251,6 +254,393 @@ fn centred_popup(
                 )
                 .child(card),
         )
+}
+
+/// A page over the dimmed window: the keys, the settings, the disks. A
+/// press outside the card closes it, as Escape does; one on the card is the
+/// card's own, and nothing reaches the screen behind either way.
+fn modal(
+    id: &'static str,
+    theme: &Theme,
+    card: impl IntoElement,
+    close: fn(&mut Disktree, &mut Context<'_, Disktree>),
+    cx: &Context<'_, Disktree>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.background.opacity(0.86))
+        .on_any_mouse_down(cx.listener(
+            move |this, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                close(this, cx);
+                window.focus(&this.focus, cx);
+            },
+        ))
+        .child(
+            div()
+                .id(ElementId::Name(format!("{id}-card").into()))
+                .debug_selector(move || format!("{id}-card"))
+                .on_any_mouse_down(
+                    |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+                        cx.stop_propagation();
+                    },
+                )
+                .child(card),
+        )
+}
+
+/// A page's heading with the way out of it at the far end, for a hand on
+/// the mouse; Escape and a press outside do the same.
+fn page_header(
+    id: &'static str,
+    glyph: gpui_omarchy::IconName,
+    title: &'static str,
+    close: fn(&mut Disktree, &mut Context<'_, Disktree>),
+    cx: &Context<'_, Disktree>,
+) -> Div {
+    let theme = cx.omarchy();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(space::SM)
+        .child(
+            gpui_omarchy::icon(glyph)
+                .size(icon::MD)
+                .text_color(theme.accent),
+        )
+        .child(
+            div()
+                .text_size(text::TITLE)
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme.bright)
+                .child(title),
+        )
+        .child(div().flex_1())
+        .child(
+            button(id, "Close", ButtonVariant::Secondary, cx)
+                .tab_stop(false)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    close(this, cx);
+                    window.focus(&this.focus, cx);
+                })),
+        )
+}
+
+/// A volume as a file manager names it: its label, then where it is
+/// mounted, `Data (D:)`; or the mount point alone when it has no label.
+fn volume_name(volume: &disktree_core::space::Volume) -> String {
+    let point = volume.point.display().to_string();
+    match &volume.label {
+        Some(label) => {
+            let short = point.trim_end_matches(['\\', '/']);
+            let short = if short.is_empty() { &point } else { short };
+            format!("{label} ({short})")
+        }
+        None => point,
+    }
+}
+
+/// How much room a volume has, of how much: `23 GiB free of 317 GiB`.
+fn volume_room(volume: &disktree_core::space::Volume) -> String {
+    volume.space.map_or_else(
+        || "size unknown".to_string(),
+        |space| {
+            format!(
+                "{} free of {}",
+                human_bytes(space.available),
+                human_bytes(space.total)
+            )
+        },
+    )
+}
+
+/// How full a volume has to be before its bar turns to the danger colour,
+/// the way a file manager warns that a drive is nearly out of room.
+const NEARLY_FULL: f32 = 0.9;
+
+/// Every disk, as the first page of a file manager shows them: name, a bar
+/// of what is used, and the room left. A click scans that one.
+fn home_page(app: &Disktree, cx: &Context<'_, Disktree>) -> Stateful<Div> {
+    let theme = cx.omarchy().clone();
+    let close: fn(&mut Disktree, &mut Context<'_, Disktree>) =
+        Disktree::close_home;
+    let mut drives = div()
+        .id("home-drives")
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(space::LG);
+    if app.volumes_loading {
+        drives = drives.child(
+            div()
+                .text_color(theme.secondary)
+                .child("Looking for disks\u{2026}"),
+        );
+    } else if app.volumes.is_empty() {
+        drives = drives.child(
+            div()
+                .text_color(theme.secondary)
+                .child("No disk could be read."),
+        );
+    }
+    for (index, volume) in app.volumes.iter().enumerate() {
+        let highlighted = index == app.volume_highlight;
+        let scanned = app.root_path.starts_with(&volume.point);
+        let used = volume.space.map_or(0.0, |space| {
+            (space.used() as f32 / space.total.max(1) as f32).clamp(0.0, 1.0)
+        });
+        let fill = if used >= NEARLY_FULL {
+            theme.danger
+        } else {
+            theme.accent
+        };
+        drives = drives.child(
+            div()
+                .id(ElementId::Name(format!("drive-{index}").into()))
+                .debug_selector(move || format!("drive-{index}"))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space::MD)
+                .w(size::DRIVE_CARD)
+                .p(space::MD)
+                .border_1()
+                .border_color(if highlighted {
+                    theme.accent
+                } else {
+                    theme.control_border()
+                })
+                .when(highlighted, |card| card.bg(theme.accent.opacity(0.12)))
+                .hover(|card| card.bg(theme.hover_fill()))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.volume_highlight = index;
+                    this.choose_volume(cx);
+                    window.focus(&this.focus, cx);
+                }))
+                .child(
+                    gpui_omarchy::icon(gpui_omarchy::IconName::HardDrive)
+                        .size(icon::LG)
+                        .text_color(theme.secondary),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(space::XS)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(space::SM)
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(text::BODY)
+                                        .text_color(theme.bright)
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(volume_name(volume)),
+                                )
+                                .when(scanned, |row| {
+                                    row.child(widgets::chip(
+                                        "scanned",
+                                        theme.accent,
+                                        cx,
+                                    ))
+                                }),
+                        )
+                        .child(widgets::bar(used, fill, cx))
+                        .child(
+                            div()
+                                .text_size(text::CAPTION)
+                                .text_color(theme.secondary)
+                                .child(volume_room(volume)),
+                        ),
+                ),
+        );
+    }
+    let card = div()
+        .flex()
+        .flex_col()
+        .gap(space::LG)
+        .w(size::HOME)
+        .max_w(relative(0.94))
+        .p(space::XL)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface)
+        .child(page_header(
+            "home-close",
+            gpui_omarchy::IconName::HardDrive,
+            "Disks",
+            close,
+            cx,
+        ))
+        .child(drives)
+        .child(
+            div()
+                .text_size(text::CAPTION)
+                .text_color(theme.secondary)
+                .child(
+                    "Click a disk to scan it \u{00b7} arrows and enter work \
+                     too \u{00b7} esc stays here",
+                ),
+        );
+    modal("home", &theme, card, close, cx)
+}
+
+/// The choices that are made once and kept: the theme, how deep the view
+/// may go, and on Windows a shortcut to the program.
+fn settings_page(
+    app: &Disktree,
+    window: &mut Window,
+    cx: &mut Context<'_, Disktree>,
+) -> Stateful<Div> {
+    use crate::appearance::ThemeChoice;
+    use crate::shortcut::Place;
+    use crate::state::{DEEP_LEVELS, USUAL_LEVELS};
+
+    let theme = cx.omarchy().clone();
+    let close: fn(&mut Disktree, &mut Context<'_, Disktree>) =
+        Disktree::close_settings;
+    let entity = cx.entity().downgrade();
+    let row = |label: &'static str, cx: &App| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .child(widgets::eyebrow(label, cx))
+    };
+
+    let themes = {
+        let entity = entity.clone();
+        button_group(
+            "settings-theme",
+            ThemeChoice::ALL
+                .into_iter()
+                .map(|choice| ChoiceItem::new(choice.key(), choice.name()))
+                .collect(),
+            ThemeChoice::ALL
+                .into_iter()
+                .position(|choice| choice == app.theme_choice),
+            move |index, window, cx| {
+                let _ = entity.update(cx, |this, cx| {
+                    this.set_theme(ThemeChoice::ALL[index], window, cx);
+                });
+            },
+            window,
+            cx,
+        )
+        .w(size::RANKING_CHOICE)
+    };
+    let deep = checkbox(
+        "settings-deep",
+        format!("Allow up to {DEEP_LEVELS} levels at once"),
+        if app.deep_levels {
+            CheckboxState::Checked
+        } else {
+            CheckboxState::Unchecked
+        },
+        cx,
+    )
+    .tab_stop(false)
+    .on_change(move |_, _, _, cx| {
+        let _ = entity.update(cx, |this, cx| {
+            this.set_deep_levels(!this.deep_levels, cx);
+        });
+    });
+    let shortcut = |id: &'static str,
+                    label: &'static str,
+                    place: Place,
+                    cx: &mut Context<'_, Disktree>| {
+        button(id, label, ButtonVariant::Outline, cx)
+            .tab_stop(false)
+            .on_click(cx.listener(move |_, _, _, cx| {
+                Disktree::create_shortcut(place, cx);
+            }))
+    };
+
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .gap(space::LG)
+        .w(size::HELP)
+        .p(space::XL)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface)
+        .child(page_header(
+            "settings-close",
+            gpui_omarchy::IconName::Settings,
+            "Settings",
+            close,
+            cx,
+        ))
+        .child(row("Theme", cx).child(themes))
+        .child(
+            row("Depth", cx).child(deep).child(
+                div()
+                    .text_size(text::CAPTION)
+                    .text_color(theme.secondary)
+                    .child(format!(
+                        "The depth control stops at {USUAL_LEVELS} levels \
+                         otherwise. Deeper draws many more tiles, most of \
+                         them too small to read, and a whole disk gets slow."
+                    )),
+            ),
+        );
+    if cfg!(windows) {
+        card = card.child(
+            row("Shortcuts", cx).child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(space::SM)
+                    .child(shortcut(
+                        "shortcut-start",
+                        "Add to Start menu",
+                        Place::StartMenu,
+                        cx,
+                    ))
+                    .child(shortcut(
+                        "shortcut-desktop",
+                        "Add to desktop",
+                        Place::Desktop,
+                        cx,
+                    )),
+            ),
+        );
+    }
+    if let Some((text, status)) = &app.notice {
+        card = card.child(
+            div()
+                .text_size(text::CAPTION)
+                .text_color(widgets::alert_color(*status, cx))
+                .child(text.clone()),
+        );
+    }
+    if let Some(path) = &app.settings_path {
+        card = card.child(
+            div()
+                .text_size(text::CAPTION)
+                .text_color(theme.secondary.opacity(0.7))
+                .child(format!("Kept in {}", path.display())),
+        );
+    }
+    modal("settings", &theme, card, close, cx)
 }
 
 /// The one question disktree asks: a permanent deletion cannot be undone, so
@@ -405,7 +795,7 @@ fn explore(
                                 .child(viewport),
                         ),
                 )
-                .children(panel.then(|| side_panel(app, &theme, cx))),
+                .children(panel.then(|| side_panel(app, &theme, window, cx))),
         )
         .child(key_bar(app, &theme, cx))
 }
@@ -460,7 +850,15 @@ fn top_bar(
         .py(space::MD)
         .border_b_1()
         .border_color(theme.divider())
-        .child(logo(theme));
+        .child(logo(theme))
+        .child(with_tooltip(
+            bar_icon("home", gpui_omarchy::IconName::HardDrive, theme)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_home(cx);
+                    window.focus(&this.focus, cx);
+                })),
+            "Every disk, to scan another",
+        ));
     let bar = match app.path_input.clone().filter(|_| app.path_open) {
         Some(input) => bar.child(
             div()
@@ -468,6 +866,10 @@ fn top_bar(
                 .debug_selector(|| "path-field".into())
                 .flex_1()
                 .min_w_0()
+                // Framed in the accent, so the row plainly became a field
+                // to type in: the input's own border is the bar's colour.
+                .border_1()
+                .border_color(theme.accent)
                 .child(gpui_omarchy::input("path-input", &input, window, cx)),
         ),
         // Where you are is navigation, and it belongs to the whole window.
@@ -990,7 +1392,11 @@ fn view_settings(
                    cx: &mut Context<'_, Disktree>| {
         button(id, label, ButtonVariant::Secondary, cx)
             .tab_stop(false)
-            .disabled(if step < 0 { depth <= 1 } else { depth >= 6 })
+            .disabled(if step < 0 {
+                depth <= 1
+            } else {
+                depth >= app.depth_limit()
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.adjust_depth(step, cx);
                 window.focus(&this.focus, cx);
@@ -1028,7 +1434,14 @@ fn view_settings(
         .child(apparent)
         .child(depth_control)
         .child(power_efficiency(app, cx))
-        .child(theme_button(app, &theme, cx))
+        .child(with_tooltip(
+            bar_icon("settings", gpui_omarchy::IconName::Settings, &theme)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_settings(cx);
+                    window.focus(&this.focus, cx);
+                })),
+            "Settings: theme, depth, shortcuts",
+        ))
         .child(repository_button(&theme, cx))
 }
 
@@ -1045,37 +1458,6 @@ fn bar_icon(
         .text_color(theme.secondary)
         .hover(|style| style.bg(theme.hover_fill()).text_color(theme.bright))
         .child(gpui_omarchy::icon(name).size(icon::MD))
-}
-
-/// Whose palette is drawn, as the glyph of the choice in force; a click
-/// steps to the next one.
-fn theme_button(
-    app: &Disktree,
-    theme: &Theme,
-    cx: &Context<'_, Disktree>,
-) -> Stateful<Div> {
-    use crate::appearance::ThemeChoice;
-    use gpui_omarchy::IconName;
-
-    let choice = app.theme_choice;
-    let glyph = match choice {
-        ThemeChoice::System => IconName::Palette,
-        ThemeChoice::Light => IconName::Sun,
-        ThemeChoice::Dark => IconName::Moon,
-    };
-    with_tooltip(
-        bar_icon("theme", glyph, theme).on_click(cx.listener(
-            |this, _, window, cx| {
-                this.cycle_theme(window, cx);
-                window.focus(&this.focus, cx);
-            },
-        )),
-        format!(
-            "Theme: {} \u{00b7} click or T for {}",
-            choice.name(),
-            choice.next().name()
-        ),
-    )
 }
 
 /// The way to the source, the releases and the issue tracker.
@@ -1309,11 +1691,155 @@ fn trail_and_legend(
         .gap(space::LG)
         .px(space::LG)
         .py(space::SM)
-        .child(scan_totals(app, theme));
+        .child(scan_totals(app, theme))
+        .child(filter_control(app, theme, cx));
     if app.find_open || !app.find.is_empty() {
         row = row.child(find_field(app, theme));
     }
     row.child(div().flex_1()).child(legend(app, theme, cx))
+}
+
+/// Sizes the Filter menu offers, as the filter reads them and as they are
+/// shown: where "large" starts on a laptop, a desktop and a media drive.
+const FILTER_SIZES: [(&str, &str); 4] = [
+    ("100m", "100 MiB"),
+    ("1g", "1 GiB"),
+    ("10g", "10 GiB"),
+    ("50g", "50 GiB"),
+];
+
+/// Filtering without typing: by name, by kind of data, or to files of at
+/// least a size. Each choice writes the word the filter field would take,
+/// so the field, the menu and `/` are one filter and can be combined.
+fn filter_control(
+    app: &Disktree,
+    theme: &Theme,
+    cx: &Context<'_, Disktree>,
+) -> Div {
+    let query = app.filter_query();
+    let active = !query.is_empty();
+    let toggle =
+        button("filter-button", "Filter", ButtonVariant::Secondary, cx)
+            .tab_stop(false)
+            .when(active, |toggle| {
+                toggle.border_color(palette::highlight(theme))
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_filter_menu(cx);
+                window.focus(&this.focus, cx);
+            }));
+    let holder = div()
+        .id("filter-control")
+        .debug_selector(|| "filter-control".into())
+        .relative()
+        .flex_shrink_0()
+        .child(toggle);
+    if !app.filter_menu {
+        return div().child(holder);
+    }
+
+    let choice = |id: String, label: String, on: bool, swatch: Option<Div>| {
+        div()
+            .id(ElementId::Name(id.clone().into()))
+            .debug_selector(move || id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(space::SM)
+            .px(space::SM)
+            .py(space::XS)
+            .text_size(text::BODY)
+            .text_color(if on { theme.bright } else { theme.foreground })
+            .when(on, |row| row.bg(theme.accent.opacity(0.18)))
+            .hover(|row| row.bg(theme.hover_fill()))
+            .cursor_pointer()
+            .children(swatch)
+            .child(div().flex_1().child(label))
+            .when(on, |row| {
+                row.child(
+                    gpui_omarchy::icon(gpui_omarchy::IconName::Check)
+                        .size(icon::SM),
+                )
+            })
+    };
+    let mut menu = card_surface(cx)
+        .id("filter-menu")
+        .debug_selector(|| "filter-menu".into())
+        .occlude()
+        .child(
+            choice("filter-name".into(), "By name\u{2026}".into(), false, None)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.filter_menu = false;
+                    this.find_open = true;
+                    cx.notify();
+                    window.focus(&this.focus, cx);
+                })),
+        )
+        .child(widgets::eyebrow("Kind", cx).pt(space::XS));
+    for category in Category::LEGEND {
+        let on = query.kind == Some(category);
+        menu = menu.child(
+            choice(
+                format!(
+                    "filter-kind-{}",
+                    disktree_core::filter::kind_key(category)
+                ),
+                category.label().to_string(),
+                on,
+                Some(widgets::swatch(palette::category_accent(
+                    theme, category,
+                ))),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // A second click on the kind in force takes it off.
+                this.filter_kind((!on).then_some(category), cx);
+                window.focus(&this.focus, cx);
+            })),
+        );
+    }
+    menu = menu.child(widgets::eyebrow("Files at least", cx).pt(space::XS));
+    for (word, label) in FILTER_SIZES {
+        let on = query.min_bytes
+            == disktree_core::filter::Query::parse(&format!(">{word}"))
+                .min_bytes;
+        menu = menu.child(
+            choice(format!("filter-size-{word}"), label.to_string(), on, None)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.filter_size((!on).then_some(word), cx);
+                    window.focus(&this.focus, cx);
+                })),
+        );
+    }
+    if active {
+        menu = menu.child(
+            choice(
+                "filter-clear".into(),
+                "Clear the filter".into(),
+                false,
+                None,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.filter_menu = false;
+                this.clear_filter();
+                cx.notify();
+                window.focus(&this.focus, cx);
+            })),
+        );
+    }
+    // Hung below the button and deferred, so it paints over the mosaic.
+    div().child(
+        holder.child(
+            div().absolute().top_full().left_0().child(
+                deferred(
+                    anchored()
+                        .snap_to_window_with_margin(px(8.))
+                        .offset(gpui_kit::point(px(0.), px(4.)))
+                        .child(menu),
+                )
+                .with_priority(2),
+            ),
+        ),
+    )
 }
 
 /// What the whole scan found, as one quiet line; unreadable paths are
@@ -1406,6 +1932,7 @@ fn legend(app: &Disktree, theme: &Theme, cx: &App) -> Div {
 fn side_panel(
     app: &Disktree,
     theme: &Theme,
+    window: &Window,
     cx: &Context<'_, Disktree>,
 ) -> Div {
     let rule = || div().h(px(1.)).bg(theme.divider());
@@ -1447,16 +1974,34 @@ fn side_panel(
         // so the two numbers that matter never leave the screen.
         .child(
             div()
-                .id("panel-lists")
+                .relative()
                 .flex()
                 .flex_col()
-                .gap(space::LG)
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .child(worth_section(app, theme, cx))
-                .child(rule())
-                .child(marked_section(app, theme, cx)),
+                .child(
+                    div()
+                        .id("panel-lists")
+                        .flex()
+                        .flex_col()
+                        .gap(space::LG)
+                        .flex_1()
+                        .min_h_0()
+                        // Room for the bar, which is drawn over this edge.
+                        .pr(space::MD)
+                        .overflow_y_scroll()
+                        .track_scroll(&app.panel_scroll)
+                        .child(worth_section(app, theme, cx))
+                        .child(rule())
+                        .child(marked_section(app, theme, cx)),
+                )
+                .child(gpui_omarchy::scrollbar(
+                    "panel-scroll",
+                    gpui_kit::base::ScrollbarAxis::Vertical,
+                    &app.panel_scroll,
+                    window,
+                    cx,
+                )),
         )
         .children(notice_line(app, theme, cx))
         .children(privacy_line(app, theme, cx))
@@ -1810,6 +2355,31 @@ fn worth_section(
                             cx,
                         )),
                 ),
+        );
+    }
+    // Offered once the short list is full, since there may then be more;
+    // and while the long one is shown, to put the short one back.
+    if app.insights_all || app.insights.len() >= crate::state::INSIGHT_LIMIT {
+        section = section.child(
+            div().flex().flex_row().pt(space::XS).child(
+                button(
+                    "insights-more",
+                    if app.insights_all {
+                        "Show fewer"
+                    } else {
+                        "Show more"
+                    },
+                    ButtonVariant::Secondary,
+                    cx,
+                )
+                .tab_stop(false)
+                .on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.toggle_insights(cx);
+                        window.focus(&this.focus, cx);
+                    },
+                )),
+            ),
         );
     }
     section
@@ -3658,8 +4228,12 @@ const MODIFIER_PATH: &str = if cfg!(target_os = "macos") {
     "ctrl-l"
 };
 
-fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
-    let theme = cx.omarchy();
+fn help_overlay(app: &Disktree, cx: &Context<'_, Disktree>) -> Stateful<Div> {
+    let theme = cx.omarchy().clone();
+    let close: fn(&mut Disktree, &mut Context<'_, Disktree>) = |this, cx| {
+        this.show_help = false;
+        cx.notify();
+    };
     // Sentence case, and the tile a key acts on is always the one under the
     // pointer if the pointer moved last, else the keyboard selection.
     let rows = [
@@ -3699,7 +4273,10 @@ fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
         ("d", "Disk usage or apparent size"),
         ("i", "Include or skip hidden entries"),
         ("p", "Show or hide the selection line"),
-        ("T", "System, light or dark theme"),
+        (
+            "T",
+            "System, light or dark theme; the settings page has it too",
+        ),
         (
             "o",
             if cfg!(target_os = "macos") {
@@ -3748,54 +4325,32 @@ fn help_overlay(app: &Disktree, cx: &gpui_kit::App) -> Div {
         );
     }
 
-    div()
-        .absolute()
-        .inset_0()
+    let card = div()
         .flex()
-        .items_center()
-        .justify_center()
-        .bg(theme.background.opacity(0.86))
+        .flex_col()
+        .gap(space::MD)
+        .w(size::HELP)
+        .p(space::XL)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface)
+        .child(page_header(
+            "help-close",
+            gpui_omarchy::IconName::Keyboard,
+            "Keyboard and mouse",
+            close,
+            cx,
+        ))
+        .child(keys)
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap(space::MD)
-                .w(size::HELP)
-                .p(space::XL)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.surface)
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(space::SM)
-                        .child(
-                            gpui_omarchy::icon(
-                                gpui_omarchy::IconName::Keyboard,
-                            )
-                            .size(icon::MD)
-                            .text_color(theme.accent),
-                        )
-                        .child(
-                            div()
-                                .text_size(text::TITLE)
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(theme.bright)
-                                .child("Keyboard and mouse"),
-                        ),
-                )
-                .child(keys)
-                .child(
-                    div()
-                        .text_size(text::CAPTION)
-                        .text_color(theme.secondary)
-                        .child(format!(
-                            "? or esc closes \u{00b7} {} \u{00b7} {}",
-                            app.root_path.display(),
-                            app.options.metric.label()
-                        )),
-                ),
-        )
+                .text_size(text::CAPTION)
+                .text_color(theme.secondary)
+                .child(format!(
+                    "?, esc or a click outside closes \u{00b7} {} \u{00b7} {}",
+                    app.root_path.display(),
+                    app.options.metric.label()
+                )),
+        );
+    modal("help", &theme, card, close, cx)
 }

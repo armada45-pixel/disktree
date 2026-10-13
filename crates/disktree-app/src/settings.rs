@@ -11,12 +11,14 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::appearance::ThemeChoice;
-use crate::state::{PANEL_MAX_REMS, PANEL_MIN_REMS, PANEL_REMS};
+use crate::state::{
+    DEEP_LEVELS, PANEL_MAX_REMS, PANEL_MIN_REMS, PANEL_REMS, USUAL_LEVELS,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     pub theme: ThemeChoice,
-    /// Levels drawn at once, 1 to 6.
+    /// Levels drawn at once: 1 to 6, or to 10 with `deep_levels`.
     pub depth: u32,
     pub include_hidden: bool,
     pub apparent_size: bool,
@@ -26,6 +28,8 @@ pub struct Settings {
     pub panel_rems: f32,
     /// Whether the side panel is shown at all.
     pub show_selection: bool,
+    /// Whether more than six levels may be drawn at once.
+    pub deep_levels: bool,
 }
 
 impl Default for Settings {
@@ -38,6 +42,7 @@ impl Default for Settings {
             mode: 0,
             panel_rems: PANEL_REMS,
             show_selection: true,
+            deep_levels: false,
         }
     }
 }
@@ -64,7 +69,7 @@ impl Settings {
                 }
                 "depth" => {
                     if let Ok(depth) = value.parse::<u32>()
-                        && (1..=6).contains(&depth)
+                        && (1..=DEEP_LEVELS).contains(&depth)
                     {
                         settings.depth = depth;
                     }
@@ -100,8 +105,18 @@ impl Settings {
                         settings.show_selection = on;
                     }
                 }
+                "deep-levels" => {
+                    if let Some(on) = flag(value) {
+                        settings.deep_levels = on;
+                    }
+                }
                 _ => {}
             }
+        }
+        // The lines come in any order, so the depth is held to what the
+        // file as a whole allows only once all of it is read.
+        if !settings.deep_levels {
+            settings.depth = settings.depth.min(USUAL_LEVELS);
         }
         settings
     }
@@ -109,7 +124,7 @@ impl Settings {
     fn text(&self) -> String {
         format!(
             "theme={}\ndepth={}\nhidden={}\napparent-size={}\nmode={}\n\
-             panel-width={:.2}\npanel={}\n",
+             panel-width={:.2}\npanel={}\ndeep-levels={}\n",
             self.theme.key(),
             self.depth,
             self.include_hidden,
@@ -117,6 +132,7 @@ impl Settings {
             MODES[self.mode.min(MODES.len() - 1)],
             self.panel_rems,
             self.show_selection,
+            self.deep_levels,
         )
     }
 }
@@ -171,6 +187,7 @@ mod tests {
             mode: 2,
             panel_rems: 30.5,
             show_selection: false,
+            deep_levels: false,
         };
         save(&path, &chosen).expect("save");
         assert_eq!(load(&path).expect("load"), chosen);
@@ -196,7 +213,11 @@ mod tests {
     #[test]
     fn a_depth_the_view_cannot_draw_is_not_taken() {
         assert_eq!(Settings::parse("depth=0").depth, 3);
-        assert_eq!(Settings::parse("depth=7").depth, 3);
         assert_eq!(Settings::parse("depth=6").depth, 6);
+        // Past six only for whoever unlocked it, whichever line is first.
+        assert_eq!(Settings::parse("depth=9").depth, 6);
+        assert_eq!(Settings::parse("depth=9\ndeep-levels=true").depth, 9);
+        assert_eq!(Settings::parse("deep-levels=true\ndepth=10").depth, 10);
+        assert_eq!(Settings::parse("deep-levels=true\ndepth=11").depth, 3);
     }
 }

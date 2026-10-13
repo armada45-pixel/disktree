@@ -261,6 +261,13 @@ pub fn hint_button(
     hint(keys, label, cx)
         .id(id)
         .flex_shrink_0()
+        // Framed and padded evenly, so the key and its word sit in the
+        // middle of something that reads as pressable.
+        .justify_center()
+        .px(space::SM)
+        .py(space::XXS)
+        .border_1()
+        .border_color(theme.control_border())
         .cursor_pointer()
         .hover(|style| style.bg(theme.hover_fill()))
         .active(|style| style.bg(theme.pressed_fill()))
