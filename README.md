@@ -149,9 +149,11 @@ disktree --help     # options: apparent size, follow links, skip hidden, …
   there (see below).
 - **Under it:** the scan totals, **Filter** and **Name**, and the legend.
   Filter narrows the mosaic to the kinds of data that are ticked, any number
-  of them, and to files between a least and a most size, typed in KiB, MiB
-  or GiB. Name is the filter `/` opens. The two combine. The settings page
-  also says which version and build this is.
+  of them, and to files between a **Min** and a **Max** size, each typed
+  with its own unit. What is in force is said beside the button. Name is
+  the filter `/` opens. The two combine. The settings page also chooses
+  whether sizes read in GiB (1024s) or GB (1000s), and says which version
+  and build this is.
 - **Mosaic:** colour is the *kind* of data — code, agent scratch,
   toolchains, synced files, git, media, documents, caches — at one muted
   level, lighter with depth. A diagonal hatch is space that can be had back
@@ -300,6 +302,24 @@ its crumb in the trail (`C:\` or `/`) opens it too. It lists every
 candidate volume mounted on the system together with its free space, by
 name, filtering out pseudo-filesystems and duplicate btrfs/APFS mount
 points. Selecting any entry resets the scan root directly to that volume.
+
+## Another machine, over SSH
+
+The page of disks has an address field: `user@host:/path`, or
+`ssh://user@host:2222/path`, scans that directory on another machine. The
+path field (`ctrl l`) takes the same address. The other machine runs
+`find` and the tree is built from what it lists, so nothing is installed
+there, but it has to have GNU `find`: a Linux machine, not macOS or a BSD.
+
+The connection is your own `ssh`: its keys, agent, config and
+`known_hosts`. disktree never asks for a password, and a host it has not
+seen before is refused rather than trusted, so connect once from a
+terminal first.
+
+A remote scan is **read-only**. Its paths are the other machine's, and the
+same path may exist on this one, so nothing can be marked or removed, and
+the file manager, git and the free-space meter are off until a local
+directory is scanned again.
 
 ## The whole disk
 

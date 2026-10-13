@@ -2236,12 +2236,18 @@ fn the_filter_menu_narrows_by_size_and_kind(cx: &mut TestAppContext) {
         least.update(cx, |field, cx| field.set_value("150", window, cx));
         most.update(cx, |field, cx| field.set_value("250", window, cx));
     });
-    click(cx, "filter-unit-0");
+    click(cx, "filter-unit-0-0");
+    click(cx, "filter-unit-1-0");
     cx.run_until_parked();
     draw(cx);
     read(&view, cx, |app| {
         assert_eq!(app.filter_least, Some(150 << 10));
         assert_eq!(app.filter_most, Some(250 << 10));
+        // Said with which is which, beside the button too.
+        assert_eq!(
+            app.size_summary().as_deref(),
+            Some("min 150 KiB \u{00b7} max 250 KiB")
+        );
         let matches = app.matches.as_ref().expect("a filter");
         assert_eq!((matches.count, matches.bytes), (1, 200_000));
         assert!(app.filter_applied);
@@ -2344,4 +2350,92 @@ fn worth_a_look_lists_more_when_asked(cx: &mut TestAppContext) {
     draw(cx);
     assert!(read(&view, cx, |app| app.insights_all));
     assert!(cx.debug_bounds("disktree-root").is_some());
+}
+
+#[gpui_kit::test]
+fn each_size_has_its_own_unit(cx: &mut TestAppContext) {
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    cx.update(|window, cx| {
+        view.update(cx, |app, cx| app.toggle_filter_menu(window, cx));
+    });
+    draw(cx);
+    let (least, most) =
+        read(&view, cx, |app| app.size_inputs.clone()).expect("the fields");
+    cx.update(|window, cx| {
+        least.update(cx, |field, cx| field.set_value("150", window, cx));
+        most.update(cx, |field, cx| field.set_value("1", window, cx));
+    });
+    // 150 KiB to 1 MiB: the min in one unit, the max in another.
+    update(&view, cx, |app, cx| app.set_size_unit(0, 0, cx));
+    update(&view, cx, |app, cx| app.set_size_unit(1, 1, cx));
+    cx.run_until_parked();
+    draw(cx);
+    read(&view, cx, |app| {
+        assert_eq!(app.size_unit, [0, 1]);
+        assert_eq!(app.filter_least, Some(150 << 10));
+        assert_eq!(app.filter_most, Some(1 << 20));
+        assert_eq!(app.matches.as_ref().map(|found| found.count), Some(2));
+    });
+    assert!(cx.debug_bounds("filter-size-summary").is_some());
+    assert!(cx.debug_bounds("filter-summary").is_some());
+}
+
+#[gpui_kit::test]
+fn another_machine_is_looked_at_and_never_acted_on(cx: &mut TestAppContext) {
+    use disktree_core::remote::Remote;
+
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    update(&view, cx, Disktree::toggle_mark_selected);
+    assert_eq!(read(&view, cx, |app| app.marks.len()), 1);
+
+    // The page of disks has the address field; nonsense is said, not tried.
+    let home = cx.debug_bounds("home").expect("the home button");
+    cx.simulate_click(home.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    assert!(
+        cx.debug_bounds("ssh-address").is_some(),
+        "the address field"
+    );
+    update(&view, cx, Disktree::connect_ssh);
+    read(&view, cx, |app| {
+        assert!(app.remote.is_none());
+        assert!(app.notice.is_some());
+    });
+
+    // Stand in for a scan of another machine: the tree on screen with a
+    // remote set, as it is once a listing lands. Nothing is connected to.
+    update(&view, cx, |app, cx| {
+        app.close_home(cx);
+        app.remote = Remote::parse("me@box:/srv/data");
+        app.marks.clear();
+        cx.notify();
+    });
+    draw(cx);
+    // Marking says why not, and marks nothing; so does the file manager.
+    press(cx, "space");
+    read(&view, cx, |app| {
+        assert!(app.marks.is_empty());
+        let (text, _) = app.notice.as_ref().expect("a reason");
+        assert!(text.contains("read-only"), "{text}");
+    });
+    update(&view, cx, |app, cx| {
+        app.notice = None;
+        app.reveal_target(cx);
+        assert!(app.notice.is_some());
+        app.begin_removal(cx);
+        assert_eq!(app.screen, Screen::Explore);
+    });
+    // A local root is a local scan again, with everything it allows.
+    let root = temp.path().to_path_buf();
+    update(&view, cx, |app, cx| app.set_root(root, cx));
+    assert!(read(&view, cx, |app| app.remote.is_none()));
+    finish_scan(&view, cx);
+    press(cx, "space");
+    assert_eq!(read(&view, cx, |app| app.marks.len()), 1);
 }

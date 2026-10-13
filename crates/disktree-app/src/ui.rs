@@ -99,7 +99,9 @@ pub mod size {
     /// The keyboard overlay.
     pub const HELP: Rems = Rems(32.5);
     /// The Filter menu: two size fields and a word between them.
-    pub const FILTER_MENU: Rems = Rems(18.0);
+    pub const FILTER_MENU: Rems = Rems(22.0);
+    /// The word before one of them: Min or Max.
+    pub const SIDE_LABEL: Rems = Rems(2.25);
     /// One of those fields: room for a number such as `1024.5`.
     pub const SIZE_FIELD: Rems = Rems(6.0);
     /// The page of disks: three cards across at the default rem.

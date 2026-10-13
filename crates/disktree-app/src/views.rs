@@ -115,7 +115,7 @@ pub fn root(
         root = root.child(help_overlay(app, cx));
     }
     if app.home_open {
-        root = root.child(home_page(app, cx));
+        root = root.child(home_page(app, window, cx));
     }
     if app.settings_open {
         root = root.child(settings_page(app, cx));
@@ -367,7 +367,11 @@ const NEARLY_FULL: f32 = 0.9;
 
 /// Every disk, as the first page of a file manager shows them: name, a bar
 /// of what is used, and the room left. A click scans that one.
-fn home_page(app: &Disktree, cx: &Context<'_, Disktree>) -> Stateful<Div> {
+fn home_page(
+    app: &Disktree,
+    window: &Window,
+    cx: &mut Context<'_, Disktree>,
+) -> Stateful<Div> {
     let theme = cx.omarchy().clone();
     let close: fn(&mut Disktree, &mut Context<'_, Disktree>) =
         Disktree::close_home;
@@ -467,7 +471,18 @@ fn home_page(app: &Disktree, cx: &Context<'_, Disktree>) -> Stateful<Div> {
                             div()
                                 .text_size(text::CAPTION)
                                 .text_color(theme.secondary)
-                                .child(volume_room(volume)),
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                // Where a volume has no label, as on Linux,
+                                // its device is what tells two apart.
+                                .child(match &volume.device {
+                                    Some(device) => format!(
+                                        "{device} \u{00b7} {}",
+                                        volume_room(volume)
+                                    ),
+                                    None => volume_room(volume),
+                                }),
                         ),
                 ),
         );
@@ -495,10 +510,72 @@ fn home_page(app: &Disktree, cx: &Context<'_, Disktree>) -> Stateful<Div> {
                 .text_size(text::CAPTION)
                 .text_color(theme.secondary)
                 .child(
-                    "Click a disk to scan it \u{00b7} arrows and enter work \
+                    "Click a disk to scan it \u{00b7} up, down and enter work \
                      too \u{00b7} esc stays here",
                 ),
-        );
+        )
+        .children(app.ssh_input.clone().map(|input| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::SM)
+                .pt(space::SM)
+                .border_t_1()
+                .border_color(theme.divider())
+                .child(widgets::eyebrow("Another machine, over SSH", cx))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(
+                            div()
+                                .id("ssh-address")
+                                .debug_selector(|| "ssh-address".into())
+                                .flex_1()
+                                .min_w_0()
+                                .child(gpui_omarchy::input(
+                                    "ssh-input",
+                                    &input,
+                                    window,
+                                    cx,
+                                )),
+                        )
+                        .child(
+                            button(
+                                "ssh-connect",
+                                "Connect",
+                                ButtonVariant::Outline,
+                                cx,
+                            )
+                            .tab_stop(false)
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.connect_ssh(cx);
+                                    this.apply_focus(window, cx);
+                                },
+                            )),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(text::CAPTION)
+                        .text_color(theme.secondary)
+                        .child(
+                            "user@host:/path \u{00b7} uses your own ssh keys \
+                             and config, never a password \u{00b7} needs a \
+                             Linux machine \u{00b7} to look at only: nothing \
+                             there can be marked or removed",
+                        ),
+                )
+                .children(app.notice.as_ref().map(|(text, status)| {
+                    div()
+                        .text_size(text::CAPTION)
+                        .text_color(widgets::alert_color(*status, cx))
+                        .child(text.clone())
+                }))
+        }));
     modal("home", &theme, card, close, cx)
 }
 
@@ -627,6 +704,32 @@ fn settings_page(
                 .child(text.clone()),
         );
     }
+    let decimal = disktree_core::size::decimal_units();
+    let mut units = div().flex().flex_row().gap(space::XS);
+    for (id, label, on) in [
+        ("units-gib", "GiB \u{00b7} 1024", false),
+        ("units-gb", "GB \u{00b7} 1000", true),
+    ] {
+        units = units.child(
+            segment(id.to_owned(), label, on == decimal, &theme).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.set_decimal_units(on, cx);
+                }),
+            ),
+        );
+    }
+    card = card.child(
+        row("Sizes", cx).child(units).child(
+            div()
+                .text_size(text::CAPTION)
+                .text_color(theme.secondary)
+                .child(
+                    "GiB counts in 1024s, as this app and Linux do. GB \
+                     counts in 1000s, as a drive's box does: a 500 GB drive \
+                     is 465 GiB.",
+                ),
+        ),
+    );
     card = card.child(
         row("About", cx).child(
             div()
@@ -811,6 +914,10 @@ fn explore(
 
 /// The selection, when it is a checkout git can say something about.
 fn selection_checkout(app: &Disktree) -> Option<std::path::PathBuf> {
+    // On another machine there is no checkout here to ask git about.
+    if app.remote.is_some() {
+        return None;
+    }
     let target = app.action_target()?;
     let node = app.node_at(&target)?;
     if !node.is_dir() {
@@ -863,7 +970,7 @@ fn top_bar(
         .child(with_tooltip(
             bar_icon("home", gpui_omarchy::IconName::HardDrive, theme)
                 .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_home(cx);
+                    this.open_home(window, cx);
                     window.focus(&this.focus, cx);
                 })),
             "Every disk, to scan another",
@@ -1735,6 +1842,19 @@ fn segment(
         .child(label)
 }
 
+/// What the Filter menu asks for, for beside its button: how many kinds are
+/// ticked, and the sizes with which is the min and which the max.
+fn filter_summary(app: &Disktree) -> Option<String> {
+    let kinds = match app.filter_kinds.as_slice() {
+        [] => None,
+        [only] => Some(only.label().to_string()),
+        several => Some(format!("{} kinds", several.len())),
+    };
+    let parts: Vec<String> =
+        kinds.into_iter().chain(app.size_summary()).collect();
+    (!parts.is_empty()).then(|| parts.join(" \u{00b7} "))
+}
+
 /// Two ways to narrow the mosaic, each its own button. **Filter** is what
 /// can be picked: kinds of data, any number of them, and a least and a
 /// most size for files. **Name** is what has to be typed, and opens the
@@ -1745,7 +1865,7 @@ fn filter_control(
     window: &mut Window,
     cx: &mut Context<'_, Disktree>,
 ) -> Div {
-    use crate::state::SIZE_UNITS;
+    use crate::state::size_units;
 
     let highlight = palette::highlight(theme);
     let chosen = app.filter_chosen();
@@ -1780,6 +1900,15 @@ fn filter_control(
             .gap(space::SM)
             .flex_shrink_0()
             .child(holder)
+            .children(filter_summary(app).map(|summary| {
+                div()
+                    .id("filter-summary")
+                    .debug_selector(|| "filter-summary".into())
+                    .text_size(text::CAPTION)
+                    .text_color(highlight)
+                    .whitespace_nowrap()
+                    .child(summary)
+            }))
             .child(
                 div()
                     .id("filter-name-holder")
@@ -1867,38 +1996,64 @@ fn filter_control(
                     cx,
                 ))
         };
-    let mut units = div().flex().flex_row().gap(space::XS);
-    for (index, unit) in SIZE_UNITS.into_iter().enumerate() {
-        units = units.child(
-            segment(
-                format!("filter-unit-{index}"),
-                unit,
-                index == app.size_unit,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_size_unit(index, cx);
-            })),
-        );
-    }
-    let menu = menu
-        .child(widgets::eyebrow("File size", cx).pt(space::SM))
-        .child(
+    // One row for each side, named, with the unit it is read in: "from
+    // 500 MiB to 4 GiB" is typed the way it is said.
+    let mut sides = div().flex().flex_col().gap(space::SM);
+    for (side, (label, id, input)) in [
+        ("Min", "filter-least", &least),
+        ("Max", "filter-most", &most),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut units = div().flex().flex_row().gap(space::XS);
+        for (index, unit) in size_units().into_iter().enumerate() {
+            units = units.child(
+                segment(
+                    format!("filter-unit-{side}-{index}"),
+                    unit,
+                    index == app.size_unit[side],
+                    theme,
+                )
+                .on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.set_size_unit(side, index, cx);
+                    },
+                )),
+            );
+        }
+        sides = sides.child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(space::SM)
-                .child(field("filter-least", &least, window, cx))
-                .child(div().text_color(theme.secondary).child("to"))
-                .child(field("filter-most", &most, window, cx)),
-        )
-        .child(units)
-        .child(
+                .child(
+                    div()
+                        .w(size::SIDE_LABEL)
+                        .flex_shrink_0()
+                        .text_size(text::BODY)
+                        .text_color(theme.bright)
+                        .child(label),
+                )
+                .child(field(id, input, window, cx))
+                .child(units),
+        );
+    }
+    let menu = menu
+        .child(widgets::eyebrow("File size", cx).pt(space::SM))
+        .child(sides)
+        .child(div().text_color(theme.secondary.opacity(0.8)).child(
+            "Min is the smallest file shown, Max the largest. Empty is no \
+             limit. Enter applies.",
+        ))
+        .children(app.size_summary().map(|summary| {
             div()
-                .text_color(theme.secondary.opacity(0.8))
-                .child("Least and most; empty is no limit. Enter applies."),
-        )
+                .id("filter-size-summary")
+                .debug_selector(|| "filter-size-summary".into())
+                .text_color(highlight)
+                .child(format!("Showing files: {summary}"))
+        }))
         .child(
             div()
                 .flex()

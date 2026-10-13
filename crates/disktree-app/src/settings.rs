@@ -30,6 +30,8 @@ pub struct Settings {
     pub show_selection: bool,
     /// Whether more than six levels may be drawn at once.
     pub deep_levels: bool,
+    /// Whether sizes are written in GB, thousands, rather than GiB, 1024s.
+    pub decimal_units: bool,
 }
 
 impl Default for Settings {
@@ -43,6 +45,7 @@ impl Default for Settings {
             panel_rems: PANEL_REMS,
             show_selection: true,
             deep_levels: false,
+            decimal_units: false,
         }
     }
 }
@@ -105,6 +108,11 @@ impl Settings {
                         settings.show_selection = on;
                     }
                 }
+                "units" => match value {
+                    "gb" => settings.decimal_units = true,
+                    "gib" => settings.decimal_units = false,
+                    _ => {}
+                },
                 "deep-levels" => {
                     if let Some(on) = flag(value) {
                         settings.deep_levels = on;
@@ -124,7 +132,7 @@ impl Settings {
     fn text(&self) -> String {
         format!(
             "theme={}\ndepth={}\nhidden={}\napparent-size={}\nmode={}\n\
-             panel-width={:.2}\npanel={}\ndeep-levels={}\n",
+             panel-width={:.2}\npanel={}\ndeep-levels={}\nunits={}\n",
             self.theme.key(),
             self.depth,
             self.include_hidden,
@@ -133,6 +141,7 @@ impl Settings {
             self.panel_rems,
             self.show_selection,
             self.deep_levels,
+            if self.decimal_units { "gb" } else { "gib" },
         )
     }
 }
@@ -188,6 +197,7 @@ mod tests {
             panel_rems: 30.5,
             show_selection: false,
             deep_levels: false,
+            decimal_units: true,
         };
         save(&path, &chosen).expect("save");
         assert_eq!(load(&path).expect("load"), chosen);

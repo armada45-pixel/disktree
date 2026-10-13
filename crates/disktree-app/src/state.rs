@@ -111,9 +111,15 @@ pub const REPOSITORY: &str = "https://github.com/tobi/disktree";
 pub const INSIGHT_LIMIT: usize = 6;
 const INSIGHT_MORE: usize = 30;
 
-/// The units a size can be typed in, in the Filter menu: each 1024 of the
-/// one before, as every size here is shown.
-pub const SIZE_UNITS: [&str; 3] = ["KiB", "MiB", "GiB"];
+/// The units a size can be typed in, in the Filter menu: each a step of
+/// the one before, in whichever of GiB and GB sizes are being shown in.
+pub fn size_units() -> [&'static str; 3] {
+    if disktree_core::size::decimal_units() {
+        ["kB", "MB", "GB"]
+    } else {
+        ["KiB", "MiB", "GiB"]
+    }
+}
 
 /// How many levels can be drawn at once. Past six a whole disk is tens of
 /// thousands of tiles too small to read and slow to lay out, so the levels
@@ -497,8 +503,16 @@ pub struct Disktree {
     /// The least and the most a file may hold, in bytes, from the menu.
     pub filter_least: Option<u64>,
     pub filter_most: Option<u64>,
-    /// Which of [`SIZE_UNITS`] the menu's two size fields are read in.
-    pub size_unit: usize,
+    /// Which unit each of the menu's two size fields is read in, the
+    /// least then the most: an index into [`size_units`]. Each has its
+    /// own, so "from 500 MiB to 4 GiB" is typed as it is said.
+    pub size_unit: [usize; 2],
+    /// The machine being scanned over SSH, when it is not this one. While
+    /// set, the tree's paths are that machine's, and nothing that acts on
+    /// a local path is offered: see [`Self::set_remote`].
+    pub remote: Option<disktree_core::remote::Remote>,
+    /// The address field on the page of disks.
+    pub ssh_input: Option<Entity<InputState>>,
     /// The menu's least and most fields, built the first time it opens.
     pub size_inputs: Option<(Entity<InputState>, Entity<InputState>)>,
     /// "Worth a look" lists [`INSIGHT_MORE`] findings instead of the few.
@@ -613,7 +627,9 @@ impl Disktree {
             filter_least: None,
             filter_most: None,
             // Megabytes: the unit most "large files" are counted in.
-            size_unit: 1,
+            size_unit: [1, 1],
+            remote: None,
+            ssh_input: None,
             size_inputs: None,
             insights_all: false,
             panel_scroll: ScrollHandle::new(),
@@ -670,6 +686,7 @@ impl Disktree {
     /// Scan a different root from scratch. Marks are kept; a mark outside
     /// the new root is shown as kept back, never removed.
     pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<'_, Self>) {
+        self.remote = None;
         self.space = space_info(&root).ok();
         self.device = device_for(&root);
         // "Whole disk" means the disk of what is on screen, which a new root
@@ -682,12 +699,97 @@ impl Disktree {
         self.start_scan(cx);
     }
 
+    /// Scan a directory on another machine, over SSH, to look at.
+    ///
+    /// The tree that comes back holds that machine's paths. Nothing here
+    /// may then treat one as a path on this machine: the same `/var/log`
+    /// may well exist on both, and removing it here because it was marked
+    /// there would delete the wrong files. So marks are dropped and
+    /// marking refused, and so are the file manager, git and the free
+    /// space meter, until a local root is scanned again.
+    pub fn set_remote(
+        &mut self,
+        remote: disktree_core::remote::Remote,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.marks.clear();
+        self.space = None;
+        self.space_baseline = None;
+        self.device = Some(remote.target.clone());
+        self.disk_root = None;
+        self.file_table = false;
+        self.root_path = PathBuf::from(&remote.path);
+        self.notice = Some((
+            format!("{remote} over ssh \u{00b7} a remote scan is read-only"),
+            Status::Neutral,
+        ));
+        self.remote = Some(remote);
+        self.screen = Screen::Explore;
+        self.home_open = false;
+        self.start_scan(cx);
+    }
+
+    /// Whether what is on screen is another machine's, and so may only be
+    /// looked at. Says so when `doing` something that would act on it.
+    fn read_only(&mut self, doing: &str, cx: &mut Context<'_, Self>) -> bool {
+        let Some(remote) = &self.remote else {
+            return false;
+        };
+        self.notice = Some((
+            format!(
+                "{doing} is not offered for {}: a remote scan is read-only",
+                remote.target
+            ),
+            Status::Warning,
+        ));
+        cx.notify();
+        true
+    }
+
+    /// Enter in the address field on the page of disks.
+    pub fn connect_ssh(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(input) = self.ssh_input.clone() else {
+            return;
+        };
+        let typed = input.read(cx).value().to_string();
+        if let Some(remote) = disktree_core::remote::Remote::parse(&typed) {
+            self.focus_request = Some(FocusTarget::Root);
+            self.set_remote(remote, cx);
+        } else {
+            self.notice = Some((
+                "an address looks like user@host:/path".into(),
+                Status::Warning,
+            ));
+            cx.notify();
+        }
+    }
+
+    fn on_ssh_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if matches!(event, InputEvent::PressEnter { .. }) && self.home_open {
+            self.connect_ssh(cx);
+            self.apply_focus(window, cx);
+        }
+    }
+
     /// Go up to `above`, a directory containing the scanned root.
     ///
     /// Memoized: the tree already measured is handed to the walk and reused
     /// where it is reached, so only what is new at the wider level is read,
     /// and the current view stays on screen until the wider tree lands.
     pub fn widen_to(&mut self, above: PathBuf, cx: &mut Context<'_, Self>) {
+        // A wider look at another machine is another listing of it: the
+        // tree in hand cannot be handed to a walk of this one.
+        if let Some(remote) = &self.remote {
+            let wider = remote.at(&above.to_string_lossy());
+            self.set_remote(wider, cx);
+            return;
+        }
         let Some(tree) = self.tree.clone() else {
             self.set_root(above, cx);
             return;
@@ -730,10 +832,20 @@ impl Disktree {
 
     /// The home page: every disk with its name, size and room, as a file
     /// manager's own first page shows them, the one being scanned too.
-    pub fn open_home(&mut self, cx: &mut Context<'_, Self>) {
+    pub fn open_home(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if !self.can_start_over() {
             return;
         }
+        if self.ssh_input.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            cx.subscribe_in(&input, window, Self::on_ssh_event).detach();
+            self.ssh_input = Some(input);
+        }
+        self.notice = None;
         self.home_open = true;
         self.filter_menu = false;
         self.load_volumes(true, cx);
@@ -865,7 +977,7 @@ impl Disktree {
     // ── saved choices ───────────────────────────────────────────────────
 
     /// The view choices as they stand, for the settings file.
-    pub const fn settings(&self) -> Settings {
+    pub fn settings(&self) -> Settings {
         Settings {
             theme: self.theme_choice,
             depth: self.layout_options.max_depth,
@@ -875,6 +987,7 @@ impl Disktree {
             panel_rems: self.panel_rems,
             show_selection: self.show_selection,
             deep_levels: self.deep_levels,
+            decimal_units: disktree_core::size::decimal_units(),
         }
     }
 
@@ -896,6 +1009,14 @@ impl Disktree {
             self.layout_options.max_depth = limit;
             self.cache = None;
         }
+        self.save_settings();
+        cx.notify();
+    }
+
+    /// Write sizes in GB, thousands, or in GiB, 1024s. A drive sold as
+    /// 500 GB reads 500 in the first and 465 in the second.
+    pub fn set_decimal_units(&self, decimal: bool, cx: &mut Context<'_, Self>) {
+        disktree_core::size::set_decimal_units(decimal);
         self.save_settings();
         cx.notify();
     }
@@ -1002,10 +1123,11 @@ impl Disktree {
             self.size_inputs = Some((least.clone(), most.clone()));
             (least, most)
         };
-        let unit = self.size_unit;
-        for (input, bytes) in
-            [(least, self.filter_least), (most, self.filter_most)]
-        {
+        let units = self.size_unit;
+        for (input, bytes, unit) in [
+            (least, self.filter_least, units[0]),
+            (most, self.filter_most, units[1]),
+        ] {
             let shown =
                 bytes.map_or_else(String::new, |bytes| size_shown(bytes, unit));
             input.update(cx, |state, cx| state.set_value(shown, window, cx));
@@ -1038,11 +1160,33 @@ impl Disktree {
         self.rerun_filter(cx);
     }
 
-    /// Read the two size fields in another unit: the numbers stay as they
-    /// were typed and mean something else, as changing a unit does.
-    pub fn set_size_unit(&mut self, unit: usize, cx: &mut Context<'_, Self>) {
-        self.size_unit = unit.min(SIZE_UNITS.len() - 1);
+    /// Read one size field, the least (`0`) or the most (`1`), in another
+    /// unit: the number stays as it was typed and means something else,
+    /// as changing a unit does.
+    pub fn set_size_unit(
+        &mut self,
+        side: usize,
+        unit: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.size_unit[side.min(1)] = unit.min(size_units().len() - 1);
         self.apply_sizes(cx);
+    }
+
+    /// The sizes in force in words, each named for the side it bounds:
+    /// `min 500 MiB · max 4.0 GiB`. `None` when neither is set.
+    pub fn size_summary(&self) -> Option<String> {
+        use disktree_core::size::human_bytes;
+        let parts: Vec<String> = [
+            self.filter_least
+                .map(|least| format!("min {}", human_bytes(least))),
+            self.filter_most
+                .map(|most| format!("max {}", human_bytes(most))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!parts.is_empty()).then(|| parts.join(" \u{00b7} "))
     }
 
     /// Take the least and most sizes from the menu's fields. An empty
@@ -1051,13 +1195,14 @@ impl Disktree {
         let Some((least, most)) = self.size_inputs.clone() else {
             return;
         };
-        let typed = |input: &Entity<InputState>| {
-            size_typed(&input.read(cx).value(), self.size_unit)
+        let typed = |input: &Entity<InputState>, unit: usize| {
+            size_typed(&input.read(cx).value(), unit)
         };
-        match (typed(&least), typed(&most)) {
+        let units = self.size_unit;
+        match (typed(&least, units[0]), typed(&most, units[1])) {
             (Ok(Some(least)), Ok(Some(most))) if least > most => {
                 self.notice = Some((
-                    "the least size is more than the most".into(),
+                    "the min size is more than the max".into(),
                     Status::Warning,
                 ));
             }
@@ -1122,7 +1267,8 @@ impl Disktree {
     /// Take the saved choices the command line has no flag for. The depth
     /// and the scan options arrive through the arguments instead, where a
     /// flag can overrule them.
-    pub const fn apply_settings(&mut self, saved: &Settings) {
+    pub fn apply_settings(&mut self, saved: &Settings) {
+        disktree_core::size::set_decimal_units(saved.decimal_units);
         self.theme_choice = saved.theme;
         if saved.mode == 2 {
             self.color_mode = ColorMode::Age;
@@ -1274,6 +1420,10 @@ impl Disktree {
         };
         // "Copy as path" in File Explorer wraps the path in quotes.
         let typed = typed.trim().trim_matches('"').trim();
+        if let Some(remote) = disktree_core::remote::Remote::parse(typed) {
+            self.set_remote(remote, cx);
+            return true;
+        }
         let Some(path) = typed_path(typed, self.home.as_deref()) else {
             cx.notify();
             return refuse(
@@ -1404,7 +1554,11 @@ impl Disktree {
 
     /// Ask git about `path` once, off the UI thread, if it is a checkout.
     pub fn ensure_git(&mut self, path: &Path, cx: &Context<'_, Self>) {
-        if self.git.contains_key(path) || self.git_pending.contains(path) {
+        // git would be asked about this machine's directory of that name.
+        if self.remote.is_some()
+            || self.git.contains_key(path)
+            || self.git_pending.contains(path)
+        {
             return;
         }
         let path = path.to_path_buf();
@@ -1583,10 +1737,14 @@ impl Disktree {
         self.scan_started = Some(Instant::now());
         self.scan_elapsed = None;
         self.scan_root.clone_from(&self.root_path);
-        self.scan = Some(ScanHandle::spawn(
-            self.root_path.clone(),
-            self.options.clone(),
-        ));
+        self.scan = Some(match &self.remote {
+            Some(remote) => {
+                ScanHandle::spawn_remote(remote.clone(), self.options.clone())
+            }
+            None => {
+                ScanHandle::spawn(self.root_path.clone(), self.options.clone())
+            }
+        });
         Self::poll_scan(epoch, cx);
         cx.notify();
     }
@@ -1636,9 +1794,12 @@ impl Disktree {
                 if came_from.is_some() {
                     self.clear_filter();
                     self.root_path.clone_from(&self.scan_root);
-                    self.space = space_info(&self.root_path).ok();
-                    self.device = device_for(&self.root_path);
-                    self.file_table = file_table_readable(&self.root_path);
+                    // Another machine's root says nothing of these disks.
+                    if self.remote.is_none() {
+                        self.space = space_info(&self.root_path).ok();
+                        self.device = device_for(&self.root_path);
+                        self.file_table = file_table_readable(&self.root_path);
+                    }
                 }
                 let metric = self.options.metric;
                 self.marks.refresh(&self.root_path, &node, metric);
@@ -1700,6 +1861,11 @@ impl Disktree {
                 cx.background_executor().timer(interval).await;
                 let ok = this
                     .update(cx, |this, cx| {
+                        // Another machine's path says nothing about this
+                        // machine's disks.
+                        if this.remote.is_some() {
+                            return;
+                        }
                         let path = this.root_path.clone();
                         let fresh = space_info(&path).ok();
                         if fresh != this.space {
@@ -2328,6 +2494,9 @@ impl Disktree {
         crumbs: &[usize],
         cx: &mut Context<'_, Self>,
     ) {
+        if self.read_only("marking", cx) {
+            return;
+        }
         let Some(target) = self.target_at(crumbs) else {
             return;
         };
@@ -2828,6 +2997,11 @@ impl Disktree {
     }
 
     pub fn begin_removal(&mut self, cx: &mut Context<'_, Self>) {
+        // Marking is refused there, so this cannot be reached with marks;
+        // it is refused again here because it is the step that deletes.
+        if self.read_only("removal", cx) {
+            return;
+        }
         let plan = self.plan();
         if plan.is_empty() {
             self.notice = Some(("nothing is marked".into(), Status::Warning));
@@ -3154,6 +3328,9 @@ impl Disktree {
 
     /// Show the tile a key acts on in Finder (or the file manager), selected.
     pub fn reveal_target(&mut self, cx: &mut Context<'_, Self>) {
+        if self.read_only("the file manager", cx) {
+            return;
+        }
         let crumbs =
             self.action_target().unwrap_or_else(|| self.crumbs.clone());
         let Some(path) = self.path_at(&crumbs) else {
@@ -3220,15 +3397,18 @@ impl Disktree {
 
         // The page of disks takes the picker's keys.
         if self.home_open {
+            // Letters are text for the address field, and left and right
+            // move its caret; only up and down are the list's.
+            let addressed = self
+                .ssh_input
+                .as_ref()
+                .is_some_and(|input| !input.read(cx).value().trim().is_empty());
             match key {
                 "escape" => self.close_home(cx),
-                "enter" => self.choose_volume(cx),
-                "up" | "left" | "k" | "h" if !control => {
-                    self.move_volume_highlight(-1, cx);
-                }
-                "down" | "right" | "j" | "l" if !control => {
-                    self.move_volume_highlight(1, cx);
-                }
+                // With an address typed, Enter is the field's own.
+                "enter" if !addressed => self.choose_volume(cx),
+                "up" if !control => self.move_volume_highlight(-1, cx),
+                "down" if !control => self.move_volume_highlight(1, cx),
                 _ => {}
             }
             return;
@@ -3838,7 +4018,8 @@ fn size_typed(text: &str, unit: usize) -> Result<Option<u64>, ()> {
         return Ok(None);
     }
     let number: f64 = text.parse().map_err(|_| ())?;
-    let bytes = number * 1024_f64.powi(unit_power(unit));
+    let bytes =
+        number * disktree_core::size::unit_step().powi(unit_power(unit));
     // `inf` and `nan` parse as numbers; neither is a size.
     if !(bytes.is_finite() && (0.0..1e18).contains(&bytes)) {
         return Err(());
@@ -3849,14 +4030,15 @@ fn size_typed(text: &str, unit: usize) -> Result<Option<u64>, ()> {
 /// `bytes` as the number to show in a size field read in `unit`, without
 /// the zeros a whole number does not need.
 fn size_shown(bytes: u64, unit: usize) -> String {
-    let number = bytes as f64 / 1024_f64.powi(unit_power(unit));
+    let number =
+        bytes as f64 / disktree_core::size::unit_step().powi(unit_power(unit));
     let text = format!("{number:.2}");
     text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
-/// The power of 1024 a unit of [`SIZE_UNITS`] stands for.
+/// How many steps above a byte a unit of [`size_units`] is.
 fn unit_power(unit: usize) -> i32 {
-    i32::try_from(unit.min(SIZE_UNITS.len() - 1)).unwrap_or(0) + 1
+    i32::try_from(unit.min(size_units().len() - 1)).unwrap_or(0) + 1
 }
 
 /// Order the picker's volumes by name, as a file manager lists drives: a

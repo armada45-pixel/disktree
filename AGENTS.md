@@ -58,6 +58,9 @@ and `cargo build --release` directly; CI runs the gate on both systems.
   press keys — so a screen that panics while painting fails a test.
 * **Never delete anything outside a marked path.** See `removal.rs`; the guards
   are load-bearing and are covered by tests.
+* **A remote scan is read-only.** Its tree holds another machine's paths, and
+  the same path may exist here. While `Disktree::remote` is set nothing may
+  mark, remove, reveal or probe a path; see `Disktree::set_remote`.
 
 ## Invariants
 
@@ -124,6 +127,8 @@ and `cargo build --release` directly; CI runs the gate on both systems.
 | which theme is in force | `crates/disktree-app/src/appearance.rs` |
 | a Start menu or desktop shortcut, on Windows | `crates/disktree-app/src/shortcut.rs` |
 | what a filter matches: name, kind, size | `crates/disktree-core/src/filter.rs` |
+| listing another machine over SSH | `crates/disktree-core/src/remote.rs` |
+| GiB or GB, and how a size is written | `crates/disktree-core/src/size.rs` |
 | spacing, type and size | `crates/disktree-app/src/ui.rs` — tokens only, no `px` in layout |
 | the mosaic's painting or labels | `crates/disktree-app/src/treemap_view.rs` |
 | layout of a screen | `crates/disktree-app/src/views.rs` |

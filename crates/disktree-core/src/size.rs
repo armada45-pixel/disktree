@@ -3,33 +3,65 @@
 //! Binary units, like `du -h` and dust. One decimal below 10, none above 100:
 //! enough resolution to compare neighbours without a wall of digits.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 const BYTE_UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+
+/// The same sizes counted in thousands, as a drive's box and Windows'
+/// own File Explorer in other systems' clothes count them.
+const DECIMAL_UNITS: [&str; 6] = ["B", "kB", "MB", "GB", "TB", "PB"];
+
+/// Whether sizes are written in thousands rather than 1024s. One switch for
+/// the whole process: a size reads the same wherever it is shown, and
+/// threading the choice through every caller would let two of them differ.
+static DECIMAL: AtomicBool = AtomicBool::new(false);
+
+/// Write sizes in GB (thousands) from now on, or in GiB (1024s) again.
+pub fn set_decimal_units(decimal: bool) {
+    DECIMAL.store(decimal, Ordering::Relaxed);
+}
+
+/// Whether sizes are being written in GB rather than GiB.
+pub fn decimal_units() -> bool {
+    DECIMAL.load(Ordering::Relaxed)
+}
+
+/// What one step between units is: 1000 or 1024.
+pub fn unit_step() -> f64 {
+    if decimal_units() { 1000.0 } else { 1024.0 }
+}
 
 /// `1.4 GiB`, `523 MiB`, `12 B`.
 pub fn human_bytes(bytes: u64) -> String {
-    scale(bytes).format(1)
+    scale(bytes, decimal_units()).format(1)
 }
 
 /// `1.4G`, `523M`, `12B`: for tile labels, where columns are scarce.
 pub fn human_bytes_short(bytes: u64) -> String {
-    scale(bytes).format(0)
+    scale(bytes, decimal_units()).format(0)
 }
 
-fn scale(bytes: u64) -> Scaled {
+fn scale(bytes: u64, decimal: bool) -> Scaled {
+    let step = if decimal { 1000.0 } else { 1024.0 };
     let mut value = bytes as f64;
     let mut unit = 0;
     // Step up from 1023.5, not 1024: no decimal is shown at that size, so
     // anything above it would print as `1024 KiB` instead of `1.0 MiB`.
-    while value >= 1023.5 && unit + 1 < BYTE_UNITS.len() {
-        value /= 1024.0;
+    while value >= step - 0.5 && unit + 1 < BYTE_UNITS.len() {
+        value /= step;
         unit += 1;
     }
-    Scaled { value, unit }
+    Scaled {
+        value,
+        unit,
+        decimal,
+    }
 }
 
 struct Scaled {
     value: f64,
     unit: usize,
+    decimal: bool,
 }
 
 impl Scaled {
@@ -42,10 +74,15 @@ impl Scaled {
         } else {
             format!("{:.0}", self.value)
         };
-        if gap == 0 {
-            format!("{text}{}", BYTE_UNITS[self.unit])
+        let units = if self.decimal {
+            DECIMAL_UNITS
         } else {
-            format!("{text} {}", BYTE_UNITS[self.unit])
+            BYTE_UNITS
+        };
+        if gap == 0 {
+            format!("{text}{}", units[self.unit])
+        } else {
+            format!("{text} {}", units[self.unit])
         }
     }
 }
@@ -94,6 +131,17 @@ pub fn share_bar(part: u64, total: u64, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes_can_be_counted_in_thousands() {
+        let decimal = |bytes| scale(bytes, true).format(1);
+        assert_eq!(decimal(999), "999 B");
+        assert_eq!(decimal(1000), "1.0 kB");
+        assert_eq!(decimal(1_500_000), "1.5 MB");
+        assert_eq!(decimal(317_000_000_000), "317 GB");
+        // The same bytes in 1024s, which is the default.
+        assert_eq!(scale(317_000_000_000, false).format(1), "295 GiB");
+    }
 
     #[test]
     fn bytes_use_binary_units_with_one_decimal_below_ten() {
