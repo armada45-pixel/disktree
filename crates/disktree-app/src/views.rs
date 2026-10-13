@@ -118,7 +118,7 @@ pub fn root(
         root = root.child(home_page(app, cx));
     }
     if app.settings_open {
-        root = root.child(settings_page(app, window, cx));
+        root = root.child(settings_page(app, cx));
     }
     if app.volumes_open {
         root = root.child(volumes_dialog(app, cx));
@@ -506,7 +506,6 @@ fn home_page(app: &Disktree, cx: &Context<'_, Disktree>) -> Stateful<Div> {
 /// may go, and on Windows a shortcut to the program.
 fn settings_page(
     app: &Disktree,
-    window: &mut Window,
     cx: &mut Context<'_, Disktree>,
 ) -> Stateful<Div> {
     use crate::appearance::ThemeChoice;
@@ -525,27 +524,23 @@ fn settings_page(
             .child(widgets::eyebrow(label, cx))
     };
 
-    let themes = {
-        let entity = entity.clone();
-        button_group(
-            "settings-theme",
-            ThemeChoice::ALL
-                .into_iter()
-                .map(|choice| ChoiceItem::new(choice.key(), choice.name()))
-                .collect(),
-            ThemeChoice::ALL
-                .into_iter()
-                .position(|choice| choice == app.theme_choice),
-            move |index, window, cx| {
-                let _ = entity.update(cx, |this, cx| {
-                    this.set_theme(ThemeChoice::ALL[index], window, cx);
-                });
-            },
-            window,
-            cx,
-        )
-        .w(size::RANKING_CHOICE)
-    };
+    // Three buttons of our own rather than the toolkit's group, which
+    // keeps a selection of its own: the theme also changes from `T`, and
+    // the two could then disagree about which one is on.
+    let mut themes = div().flex().flex_row().gap(space::XS);
+    for choice in ThemeChoice::ALL {
+        themes = themes.child(
+            segment(
+                format!("theme-{}", choice.key()),
+                choice.name(),
+                choice == app.theme_choice,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.set_theme(choice, window, cx);
+            })),
+        );
+    }
     let deep = checkbox(
         "settings-deep",
         format!("Allow up to {DEEP_LEVELS} levels at once"),
@@ -632,6 +627,20 @@ fn settings_page(
                 .child(text.clone()),
         );
     }
+    card = card.child(
+        row("About", cx).child(
+            div()
+                .id("about")
+                .debug_selector(|| "about".into())
+                .text_size(text::BODY)
+                .text_color(theme.foreground)
+                .child(format!(
+                    "disktree {} \u{00b7} build {}",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("DISKTREE_BUILD")
+                )),
+        ),
+    );
     if let Some(path) = &app.settings_path {
         card = card.child(
             div()
@@ -784,7 +793,7 @@ fn explore(
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
-                        .child(trail_and_legend(app, &theme, cx))
+                        .child(trail_and_legend(app, &theme, window, cx))
                         .child(
                             div()
                                 .flex()
@@ -1682,7 +1691,8 @@ fn power_efficiency(app: &Disktree, cx: &Context<'_, Disktree>) -> Div {
 fn trail_and_legend(
     app: &Disktree,
     theme: &Theme,
-    cx: &Context<'_, Disktree>,
+    window: &mut Window,
+    cx: &mut Context<'_, Disktree>,
 ) -> Div {
     let mut row = div()
         .flex()
@@ -1692,142 +1702,255 @@ fn trail_and_legend(
         .px(space::LG)
         .py(space::SM)
         .child(scan_totals(app, theme))
-        .child(filter_control(app, theme, cx));
+        .child(filter_control(app, theme, window, cx));
     if app.find_open || !app.find.is_empty() {
         row = row.child(find_field(app, theme));
     }
     row.child(div().flex_1()).child(legend(app, theme, cx))
 }
 
-/// Sizes the Filter menu offers, as the filter reads them and as they are
-/// shown: where "large" starts on a laptop, a desktop and a media drive.
-const FILTER_SIZES: [(&str, &str); 4] = [
-    ("100m", "100 MiB"),
-    ("1g", "1 GiB"),
-    ("10g", "10 GiB"),
-    ("50g", "50 GiB"),
-];
+/// One choice of a few set side by side: the theme, a size's unit.
+fn segment(
+    id: String,
+    label: &'static str,
+    on: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(id.clone().into()))
+        .debug_selector(move || id)
+        .px(space::MD)
+        .py(space::XS)
+        .border_1()
+        .border_color(if on {
+            theme.accent
+        } else {
+            theme.control_border()
+        })
+        .text_size(text::BODY)
+        .text_color(if on { theme.bright } else { theme.secondary })
+        .when(on, |this| this.bg(theme.accent.opacity(0.18)))
+        .hover(|this| this.bg(theme.hover_fill()))
+        .cursor_pointer()
+        .child(label)
+}
 
-/// Filtering without typing: by name, by kind of data, or to files of at
-/// least a size. Each choice writes the word the filter field would take,
-/// so the field, the menu and `/` are one filter and can be combined.
+/// Two ways to narrow the mosaic, each its own button. **Filter** is what
+/// can be picked: kinds of data, any number of them, and a least and a
+/// most size for files. **Name** is what has to be typed, and opens the
+/// field `/` opens. They combine, and neither shows the other's words.
 fn filter_control(
     app: &Disktree,
     theme: &Theme,
-    cx: &Context<'_, Disktree>,
+    window: &mut Window,
+    cx: &mut Context<'_, Disktree>,
 ) -> Div {
-    let query = app.filter_query();
-    let active = !query.is_empty();
+    use crate::state::SIZE_UNITS;
+
+    let highlight = palette::highlight(theme);
+    let chosen = app.filter_chosen();
     let toggle =
         button("filter-button", "Filter", ButtonVariant::Secondary, cx)
             .tab_stop(false)
-            .when(active, |toggle| {
-                toggle.border_color(palette::highlight(theme))
-            })
+            .when(chosen, |toggle| toggle.border_color(highlight))
             .on_click(cx.listener(|this, _, window, cx| {
-                this.toggle_filter_menu(cx);
-                window.focus(&this.focus, cx);
+                this.toggle_filter_menu(window, cx);
+                this.apply_focus(window, cx);
             }));
+    let name = button("filter-name", "Name", ButtonVariant::Secondary, cx)
+        .tab_stop(false)
+        .when(!app.find.is_empty(), |name| name.border_color(highlight))
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.filter_menu = false;
+            this.find_open = true;
+            cx.notify();
+            window.focus(&this.focus, cx);
+        }));
     let holder = div()
         .id("filter-control")
         .debug_selector(|| "filter-control".into())
         .relative()
         .flex_shrink_0()
         .child(toggle);
-    if !app.filter_menu {
-        return div().child(holder);
-    }
-
-    let choice = |id: String, label: String, on: bool, swatch: Option<Div>| {
+    let buttons = |holder: Stateful<Div>| {
         div()
-            .id(ElementId::Name(id.clone().into()))
-            .debug_selector(move || id)
             .flex()
             .flex_row()
             .items_center()
             .gap(space::SM)
-            .px(space::SM)
-            .py(space::XS)
-            .text_size(text::BODY)
-            .text_color(if on { theme.bright } else { theme.foreground })
-            .when(on, |row| row.bg(theme.accent.opacity(0.18)))
-            .hover(|row| row.bg(theme.hover_fill()))
-            .cursor_pointer()
-            .children(swatch)
-            .child(div().flex_1().child(label))
-            .when(on, |row| {
-                row.child(
-                    gpui_omarchy::icon(gpui_omarchy::IconName::Check)
-                        .size(icon::SM),
-                )
-            })
+            .flex_shrink_0()
+            .child(holder)
+            .child(
+                div()
+                    .id("filter-name-holder")
+                    .debug_selector(|| "filter-name".into())
+                    .child(name),
+            )
     };
+    let Some((least, most)) =
+        app.size_inputs.clone().filter(|_| app.filter_menu)
+    else {
+        return buttons(holder);
+    };
+
     let mut menu = card_surface(cx)
         .id("filter-menu")
         .debug_selector(|| "filter-menu".into())
         .occlude()
-        .child(
-            choice("filter-name".into(), "By name\u{2026}".into(), false, None)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.filter_menu = false;
-                    this.find_open = true;
-                    cx.notify();
-                    window.focus(&this.focus, cx);
-                })),
-        )
-        .child(widgets::eyebrow("Kind", cx).pt(space::XS));
+        .w(size::FILTER_MENU)
+        .child(widgets::eyebrow("Kind \u{00b7} any ticked", cx));
     for category in Category::LEGEND {
-        let on = query.kind == Some(category);
-        menu = menu.child(
-            choice(
-                format!(
-                    "filter-kind-{}",
-                    disktree_core::filter::kind_key(category)
-                ),
-                category.label().to_string(),
-                on,
-                Some(widgets::swatch(palette::category_accent(
-                    theme, category,
-                ))),
-            )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                // A second click on the kind in force takes it off.
-                this.filter_kind((!on).then_some(category), cx);
-                window.focus(&this.focus, cx);
-            })),
+        let on = app.filter_kinds.contains(&category);
+        let id = format!(
+            "filter-kind-{}",
+            disktree_core::filter::kind_key(category)
         );
-    }
-    menu = menu.child(widgets::eyebrow("Files at least", cx).pt(space::XS));
-    for (word, label) in FILTER_SIZES {
-        let on = query.min_bytes
-            == disktree_core::filter::Query::parse(&format!(">{word}"))
-                .min_bytes;
         menu = menu.child(
-            choice(format!("filter-size-{word}"), label.to_string(), on, None)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.filter_size((!on).then_some(word), cx);
-                    window.focus(&this.focus, cx);
+            div()
+                .id(ElementId::Name(id.clone().into()))
+                .debug_selector(move || id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space::SM)
+                .px(space::SM)
+                .py(space::XS)
+                .text_size(text::BODY)
+                .text_color(if on { theme.bright } else { theme.foreground })
+                .hover(|row| row.bg(theme.hover_fill()))
+                .cursor_pointer()
+                // A box that is ticked or not, since any number can be.
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(space::LG)
+                        .border_1()
+                        .border_color(if on {
+                            theme.accent
+                        } else {
+                            theme.control_border()
+                        })
+                        .when(on, |tick| {
+                            tick.bg(theme.accent.opacity(0.25)).child(
+                                gpui_omarchy::icon(
+                                    gpui_omarchy::IconName::Check,
+                                )
+                                .size(icon::SM),
+                            )
+                        }),
+                )
+                .child(widgets::swatch(palette::category_accent(
+                    theme, category,
+                )))
+                .child(div().flex_1().child(category.label()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_filter_kind(category, cx);
                 })),
         );
     }
-    if active {
-        menu = menu.child(
-            choice(
-                "filter-clear".into(),
-                "Clear the filter".into(),
-                false,
-                None,
+
+    let field =
+        |id: &'static str,
+         input: &gpui_kit::Entity<gpui_kit::base::input::InputState>,
+         window: &mut Window,
+         cx: &mut Context<'_, Disktree>| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .w(size::SIZE_FIELD)
+                .child(gpui_omarchy::input(
+                    ElementId::Name(format!("{id}-input").into()),
+                    input,
+                    window,
+                    cx,
+                ))
+        };
+    let mut units = div().flex().flex_row().gap(space::XS);
+    for (index, unit) in SIZE_UNITS.into_iter().enumerate() {
+        units = units.child(
+            segment(
+                format!("filter-unit-{index}"),
+                unit,
+                index == app.size_unit,
+                theme,
             )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.filter_menu = false;
-                this.clear_filter();
-                cx.notify();
-                window.focus(&this.focus, cx);
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_size_unit(index, cx);
             })),
         );
     }
+    let menu = menu
+        .child(widgets::eyebrow("File size", cx).pt(space::SM))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space::SM)
+                .child(field("filter-least", &least, window, cx))
+                .child(div().text_color(theme.secondary).child("to"))
+                .child(field("filter-most", &most, window, cx)),
+        )
+        .child(units)
+        .child(
+            div()
+                .text_color(theme.secondary.opacity(0.8))
+                .child("Least and most; empty is no limit. Enter applies."),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(space::SM)
+                .pt(space::XS)
+                .child(
+                    button("filter-apply", "Apply", ButtonVariant::Outline, cx)
+                        .tab_stop(false)
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.apply_sizes(cx)),
+                        ),
+                )
+                .child(
+                    button(
+                        "filter-clear",
+                        "Clear",
+                        ButtonVariant::Secondary,
+                        cx,
+                    )
+                    .tab_stop(false)
+                    .disabled(!chosen)
+                    .on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.clear_chosen_filter(window, cx);
+                        },
+                    )),
+                )
+                .child(div().flex_1())
+                .child(
+                    button(
+                        "filter-done",
+                        "Close",
+                        ButtonVariant::Secondary,
+                        cx,
+                    )
+                    .tab_stop(false)
+                    .on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.close_filter_menu(cx);
+                            this.apply_focus(window, cx);
+                        },
+                    )),
+                ),
+        )
+        .children(app.notice.as_ref().map(|(text, status)| {
+            div()
+                .text_color(widgets::alert_color(*status, cx))
+                .child(text.clone())
+        }));
     // Hung below the button and deferred, so it paints over the mosaic.
-    div().child(
+    buttons(
         holder.child(
             div().absolute().top_full().left_0().child(
                 deferred(

@@ -147,10 +147,11 @@ disktree --help     # options: apparent size, follow links, skip hidden, …
   their share and size, to jump sideways (arrows and Enter work too). Above
   the scanned root a crumb is dimmer, and clicking it widens the scan to
   there (see below).
-- **Under it:** the scan totals, **Filter**, the filter when one is set, and
-  the legend. Filter narrows the mosaic by name, by kind of data, or to
-  files of at least a size; the same can be typed after `/` as `kind:cache`
-  or `>1g`, alone or beside a name.
+- **Under it:** the scan totals, **Filter** and **Name**, and the legend.
+  Filter narrows the mosaic to the kinds of data that are ticked, any number
+  of them, and to files between a least and a most size, typed in KiB, MiB
+  or GiB. Name is the filter `/` opens. The two combine. The settings page
+  also says which version and build this is.
 - **Mosaic:** colour is the *kind* of data — code, agent scratch,
   toolchains, synced files, git, media, documents, caches — at one muted
   level, lighter with depth. A diagonal hatch is space that can be had back

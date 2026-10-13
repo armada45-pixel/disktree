@@ -7,8 +7,9 @@
 //! so a filtered treemap shows exactly the matches, at their true relative
 //! sizes, in the places they live.
 //!
-//! Two words in the needle are not part of the name: `kind:cache` asks for
-//! one [`Category`], and `>1g` for files of at least that size. See
+//! Some words in the needle are not part of the name: `kind:cache` asks
+//! for a [`Category`], and may be given more than once for any of several;
+//! `>1g` asks for files of at least that size and `<4g` of at most. See
 //! [`Query`].
 
 use rustc_hash::FxHashMap;
@@ -21,19 +22,24 @@ use crate::tree::{Metric, Node};
 pub struct Query {
     /// Text the name must contain, lowercased. Empty asks nothing.
     pub name: String,
-    /// The kind of data it must be.
-    pub kind: Option<Category>,
-    /// The least a file may hold. Asked of files only: a directory is as
-    /// large as everything in it, so every directory above a large file
-    /// would match and the small files beside it would come along.
+    /// The kinds of data it may be: any one of them. Empty asks nothing.
+    pub kinds: Vec<Category>,
+    /// The least a file may hold. A size is asked of files only: a
+    /// directory is as large as everything in it, so every directory above
+    /// a large file would match and the small files beside it come along.
     pub min_bytes: Option<u64>,
+    /// The most a file may hold.
+    pub max_bytes: Option<u64>,
 }
 
 /// The word that asks for a kind: `kind:cache`.
 pub const KIND_PREFIX: &str = "kind:";
 
-/// The word that asks for a size: `>500m`.
-pub const SIZE_PREFIX: char = '>';
+/// The word that asks for a least size: `>500m`.
+pub const LEAST_PREFIX: char = '>';
+
+/// The word that asks for a most size: `<4g`.
+pub const MOST_PREFIX: char = '<';
 
 impl Query {
     /// Read a needle. A word that looks like a kind or a size but names
@@ -45,11 +51,16 @@ impl Query {
         for word in needle.split_whitespace() {
             let word = word.to_ascii_lowercase();
             let kind = word.strip_prefix(KIND_PREFIX).and_then(kind_named);
-            let size = word.strip_prefix(SIZE_PREFIX).and_then(parse_size);
+            let least = word.strip_prefix(LEAST_PREFIX).and_then(parse_size);
+            let most = word.strip_prefix(MOST_PREFIX).and_then(parse_size);
             if let Some(kind) = kind {
-                query.kind = Some(kind);
-            } else if let Some(size) = size {
-                query.min_bytes = Some(size);
+                if !query.kinds.contains(&kind) {
+                    query.kinds.push(kind);
+                }
+            } else if least.is_some() {
+                query.min_bytes = least;
+            } else if most.is_some() {
+                query.max_bytes = most;
             } else {
                 words.push(word);
             }
@@ -59,15 +70,20 @@ impl Query {
     }
 
     pub const fn is_empty(&self) -> bool {
-        self.name.is_empty() && self.kind.is_none() && self.min_bytes.is_none()
+        self.name.is_empty()
+            && self.kinds.is_empty()
+            && self.min_bytes.is_none()
+            && self.max_bytes.is_none()
     }
 
     fn matches(&self, node: &Node) -> bool {
+        let sized = self.min_bytes.is_some() || self.max_bytes.is_some();
         (self.name.is_empty() || contains_ignoring_case(&node.name, &self.name))
-            && self.kind.is_none_or(|kind| node.category == kind)
-            && self
-                .min_bytes
-                .is_none_or(|least| !node.is_dir() && node.bytes >= least)
+            && (self.kinds.is_empty() || self.kinds.contains(&node.category))
+            && (!sized
+                || (!node.is_dir()
+                    && self.min_bytes.is_none_or(|least| node.bytes >= least)
+                    && self.max_bytes.is_none_or(|most| node.bytes <= most)))
     }
 }
 
@@ -263,19 +279,20 @@ mod tests {
 
     #[test]
     fn a_needle_can_ask_for_a_kind_and_a_size_beside_a_name() {
-        let query = Query::parse("  Blob kind:cache >1.5g ");
+        let query = Query::parse("  Blob kind:cache >1.5g kind:media <4g ");
         assert_eq!(query.name, "blob");
-        assert_eq!(query.kind, Some(Category::Cache));
+        assert_eq!(query.kinds, [Category::Cache, Category::Media]);
         assert_eq!(query.min_bytes, Some(3 << 29));
+        assert_eq!(query.max_bytes, Some(4 << 30));
         assert_eq!(Query::parse(">500m").min_bytes, Some(500 << 20));
         assert_eq!(Query::parse(">2gib").min_bytes, Some(2 << 30));
         // Words that only look the part stay in the name.
         let odd = Query::parse("kind:plaid >big");
         assert_eq!(odd.name, "kind:plaid >big");
-        assert!(odd.kind.is_none() && odd.min_bytes.is_none());
+        assert!(odd.kinds.is_empty() && odd.min_bytes.is_none());
         for category in Category::LEGEND {
             let word = format!("{KIND_PREFIX}{}", kind_key(category));
-            assert_eq!(Query::parse(&word).kind, Some(category));
+            assert_eq!(Query::parse(&word).kinds, [category]);
         }
     }
 
@@ -313,6 +330,13 @@ mod tests {
         assert_eq!(kind.count, 1);
         assert_eq!(kind.bytes, 42);
         assert_eq!(kind.keep(&[store]), Some(Keep::Whole));
+        // A most as well as a least: only what lies between.
+        let band = filter(&root, &[], ">30 <45").expect("a band");
+        assert_eq!((band.count, band.bytes), (1, 40));
+        // Any of several kinds.
+        let either =
+            filter(&root, &[], "kind:media kind:cache").expect("kinds");
+        assert_eq!((either.count, either.bytes), (1, 42));
         // Both together: the large file of that kind alone.
         let both = filter(&root, &[], "kind:cache >30").expect("both");
         assert_eq!((both.count, both.bytes), (1, 40));
