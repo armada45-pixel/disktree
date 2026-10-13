@@ -2280,6 +2280,13 @@ fn the_filter_menu_narrows_by_size_and_kind(cx: &mut TestAppContext) {
         assert_eq!(side, 1);
         assert!(why.starts_with("Max is below Min"), "{why}");
     });
+    // Apply puts the keyboard in the field that is wrong: Max, here.
+    click(cx, "filter-apply");
+    let in_max = cx.update(|window, cx| {
+        use gpui_kit::Focusable as _;
+        most.read(cx).focus_handle(cx).is_focused(window)
+    });
+    assert!(in_max, "the Max field has the keyboard");
     // Put right, the error goes; nothing is left greyed out meanwhile.
     cx.update(|window, cx| {
         least.update(cx, |field, cx| field.set_value("150", window, cx));
@@ -2620,6 +2627,7 @@ fn another_machine_is_looked_at_and_never_acted_on(cx: &mut TestAppContext) {
     update(&view, cx, Disktree::toggle_mark_selected);
     assert_eq!(read(&view, cx, |app| app.marks.len()), 1);
     assert!(cx.debug_bounds("mark-button").is_some());
+    assert!(cx.debug_bounds("key-mark").is_some());
 
     // The page of disks has the address field; nonsense is said, not tried.
     let home = cx.debug_bounds("home").expect("the home button");
@@ -2654,6 +2662,9 @@ fn another_machine_is_looked_at_and_never_acted_on(cx: &mut TestAppContext) {
         });
     });
     assert!(cx.debug_bounds("mark-button").is_none());
+    assert!(cx.debug_bounds("key-mark").is_none());
+    assert!(cx.debug_bounds("key-review").is_none());
+    assert!(cx.debug_bounds("key-open").is_some());
     // Marking says why not, and marks nothing; so does the file manager.
     press(cx, "space");
     read(&view, cx, |app| {

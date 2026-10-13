@@ -98,6 +98,43 @@ fn tidy(path: &str) -> String {
     }
 }
 
+/// `target` with its host spelled as the user's SSH config spells it.
+///
+/// `ssh` matches a `Host` line by case, so `mybox` does not find the
+/// entry for `MyBox` and is looked up as a name on the network instead,
+/// which fails with nothing to say why. A name is not told apart by case
+/// anywhere else it is typed, so the entry's own spelling is used when
+/// the typed one names no entry exactly. Patterns are left to `ssh`.
+fn as_configured(target: &str, config: &str) -> String {
+    let (user, host) = match target.rsplit_once('@') {
+        Some((user, host)) => (Some(user), host),
+        None => (None, target),
+    };
+    let names: Vec<&str> = config
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (word, rest) = line
+                .split_once(|char: char| char.is_whitespace() || char == '=')?;
+            word.eq_ignore_ascii_case("host").then_some(rest)
+        })
+        .flat_map(|names| names.split([' ', '\t', '=']))
+        .filter(|name| !name.is_empty() && !name.contains(['*', '?', '!']))
+        .collect();
+    let spelled = if names.contains(&host) {
+        host
+    } else {
+        names
+            .into_iter()
+            .find(|name| name.eq_ignore_ascii_case(host))
+            .unwrap_or(host)
+    };
+    match user {
+        Some(user) => format!("{user}@{spelled}"),
+        None => spelled.to_owned(),
+    }
+}
+
 /// `text` as one word of a POSIX shell: the path is the one thing in the
 /// remote command that is not ours, and it must stay a path.
 fn quoted(text: &str) -> String {
@@ -134,9 +171,14 @@ pub(crate) fn scan(
     if let Some(port) = remote.port {
         command.args(["-p", &port.to_string()]);
     }
+    let config = std::env::home_dir()
+        .and_then(|home| {
+            std::fs::read_to_string(home.join(".ssh").join("config")).ok()
+        })
+        .unwrap_or_default();
     command
         .arg("--")
-        .arg(&remote.target)
+        .arg(as_configured(&remote.target, &config))
         .arg(listing_command(&remote.path, options))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -346,6 +388,23 @@ impl Entry {
 mod tests {
     use super::*;
     use crate::tree::{Metric, aggregate};
+
+    #[test]
+    fn a_host_is_found_in_the_config_whatever_its_case() {
+        let config = "# mine\nHost box-HS other\n    HostName 10.0.0.9\n\
+                      Host *.lan !gate\n  User me\nhost=Lower\n";
+        assert_eq!(as_configured("Box-hs", config), "box-HS");
+        assert_eq!(as_configured("me@BOX-HS", config), "me@box-HS");
+        assert_eq!(as_configured("OTHER", config), "other");
+        assert_eq!(as_configured("lower", config), "Lower");
+        // Spelled as an entry is, or naming none: as typed.
+        assert_eq!(as_configured("box-HS", config), "box-HS");
+        assert_eq!(as_configured("elsewhere", config), "elsewhere");
+        // A pattern is ssh's to match, and `HostName` is not `Host`.
+        assert_eq!(as_configured("X.LAN", config), "X.LAN");
+        assert_eq!(as_configured("10.0.0.9", config), "10.0.0.9");
+        assert_eq!(as_configured("me@box", ""), "me@box");
+    }
 
     #[test]
     fn a_listing_ssh_did_not_finish_is_not_a_tree() {

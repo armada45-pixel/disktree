@@ -2223,7 +2223,8 @@ fn filter_control(
                 .child("Esc closes"),
         )
         .child(
-            // Never disabled: a bad size is answered beside its field.
+            // Never disabled: a bad size is answered beside its field,
+            // and the keyboard is put there.
             button("filter-apply", "Apply", ButtonVariant::Primary, cx)
                 .debug_selector(|| "filter-apply".into())
                 .min_h(size::TARGET)
@@ -2235,7 +2236,9 @@ fn filter_control(
                         .font_weight(FontWeight::NORMAL)
                         .child("Enter"),
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.apply_sizes(cx))),
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.press_apply(window, cx);
+                })),
         );
 
     // A focus scope, so Tab and Shift+Tab walk the menu's controls.
@@ -2731,8 +2734,11 @@ fn worth_section(
                 .text_color(theme.secondary)
                 .child(if app.tree().is_some() {
                     "Nothing obviously disposable"
-                } else {
+                } else if app.scan.is_some() {
                     "Waiting for the scan"
+                } else {
+                    // Cancelled, or failed: there is none to wait for.
+                    "Nothing was scanned"
                 }),
         );
     }
@@ -2899,7 +2905,11 @@ fn marked_section(
             div()
                 .text_size(text::CAPTION)
                 .text_color(theme.secondary)
-                .child("Space marks the tile you point at"),
+                .child(if app.remote.is_some() {
+                    "Nothing is marked on another machine"
+                } else {
+                    "Space marks the tile you point at"
+                }),
         );
     }
     for (index, item) in app.marks.items().iter().take(MARKED_ROWS).enumerate()
@@ -3390,7 +3400,13 @@ fn key_bar(app: &Disktree, theme: &Theme, cx: &Context<'_, Disktree>) -> Div {
         .flex_1()
         .min_w_0()
         .overflow_hidden();
-    for (keys, label, key) in hints {
+    // Marking and its review are not offered for another machine, so
+    // their keys are not advertised there.
+    let local = app.remote.is_none();
+    for (keys, label, key) in hints
+        .into_iter()
+        .filter(|(_, label, _)| local || !matches!(*label, "mark" | "review"))
+    {
         lane = lane.child(match key {
             Some(key) => key_hint(keys, label, key, cx).into_any_element(),
             None => widgets::hint(keys, label, cx)
@@ -3476,7 +3492,11 @@ fn scanning_panel(
     cx: &Context<'_, Disktree>,
 ) -> Div {
     let progress = &app.progress;
-    let cancelled = app.scan.is_none() && progress.cancelled;
+    // No scan running and no tree: it was cancelled, or it failed, as a
+    // connection to another machine does when the host is not found.
+    // Either way nothing is being read, so nothing here should spin.
+    let stopped = app.scan.is_none();
+    let cancelled = stopped && progress.cancelled;
     let mut panel = div()
         .flex()
         .flex_col()
@@ -3486,7 +3506,7 @@ fn scanning_panel(
         .justify_center()
         .gap(space::LG)
         .bg(theme.inset)
-        .when(!cancelled, |panel| {
+        .when(!stopped, |panel| {
             panel.child(
                 gpui_omarchy::icon(gpui_omarchy::IconName::Loader)
                     .size(icon::LG)
@@ -3500,6 +3520,8 @@ fn scanning_panel(
                 .text_color(theme.bright)
                 .child(if cancelled {
                     format!("Stopped reading {}", widgets::display_root(app))
+                } else if stopped {
+                    format!("Could not read {}", widgets::display_root(app))
                 } else {
                     format!("Reading {}", widgets::display_root(app))
                 }),
@@ -3527,7 +3549,7 @@ fn scanning_panel(
                     cx,
                 )),
         )
-        .when(!cancelled, |panel| {
+        .when(!stopped, |panel| {
             panel.child(
                 div()
                     .w(size::SCANNING_METER)
@@ -3544,8 +3566,10 @@ fn scanning_panel(
             div()
                 .text_size(text::BODY)
                 .text_color(theme.secondary)
-                .child(if cancelled {
+                .child(if stopped {
                     "Nothing is shown from a scan that did not finish."
+                } else if app.remote.is_some() {
+                    "Another machine's files can be looked at as soon as it                      lands, and nothing else: a remote scan is read-only."
                 } else {
                     "Marking, zooming and the free-space meter all work as soon as it lands."
                 }),
@@ -4538,10 +4562,12 @@ fn history_card(app: &Disktree, back: bool, cx: &gpui_kit::App) -> Div {
 pub fn hover_tooltip(app: &Disktree, cx: &gpui_kit::App) -> Option<Div> {
     let crumbs = app.hovered.as_deref()?;
     let is_dir = app.node_at(crumbs)?.is_dir();
-    let keys = if is_dir {
-        "space mark · enter open"
-    } else {
-        "space mark"
+    // Marking is not offered for another machine, so it is not named.
+    let keys = match (app.remote.is_some(), is_dir) {
+        (false, true) => "space mark · enter open",
+        (false, false) => "space mark",
+        (true, true) => "enter open",
+        (true, false) => "read-only",
     };
     node_card(app, crumbs, keys, cx)
 }

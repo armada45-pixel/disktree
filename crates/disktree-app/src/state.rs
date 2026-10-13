@@ -1374,15 +1374,31 @@ impl Disktree {
         cx.notify();
     }
 
+    /// Apply, from the button or Enter: the sizes are taken, and when one
+    /// is wrong the keyboard is put in its field, where the fix is typed.
+    pub fn press_apply(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.apply_sizes(cx);
+        if let Some((side, _)) = &self.size_error
+            && let Some((least, most)) = self.size_inputs.clone()
+        {
+            let input = if *side == 0 { least } else { most };
+            input.update(cx, |state, cx| state.focus(window, cx));
+        }
+    }
+
     fn on_size_event(
         &mut self,
         _: &Entity<InputState>,
         event: &InputEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         if matches!(event, InputEvent::PressEnter { .. }) && self.filter_menu {
-            self.apply_sizes(cx);
+            self.press_apply(window, cx);
         }
     }
 
