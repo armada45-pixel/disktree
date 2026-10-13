@@ -2243,11 +2243,12 @@ fn the_filter_menu_narrows_by_size_and_kind(cx: &mut TestAppContext) {
     read(&view, cx, |app| {
         assert_eq!(app.filter_least, Some(150 << 10));
         assert_eq!(app.filter_most, Some(250 << 10));
-        // Said with which is which, beside the button too.
+        // Read back as a sentence, and counted for the button.
         assert_eq!(
-            app.size_summary().as_deref(),
-            Some("min 150 KiB \u{00b7} max 250 KiB")
+            app.filter_sentence(),
+            "Showing files of from 150 KiB to 250 KiB"
         );
+        assert_eq!(app.filter_count(), 2);
         let matches = app.matches.as_ref().expect("a filter");
         assert_eq!((matches.count, matches.bytes), (1, 200_000));
         assert!(app.filter_applied);
@@ -2258,10 +2259,37 @@ fn the_filter_menu_narrows_by_size_and_kind(cx: &mut TestAppContext) {
         least.update(cx, |field, cx| field.set_value("lots", window, cx));
     });
     update(&view, cx, Disktree::apply_sizes);
+    draw(cx);
     read(&view, cx, |app| {
-        assert!(app.notice.is_some());
+        // Said for the field it is in, with the way out of it.
+        let (side, why) = app.size_error.clone().expect("an error");
+        assert_eq!(side, 0);
+        assert!(why.starts_with("Min is not a number"), "{why}");
         assert_eq!(app.filter_least, Some(150 << 10));
     });
+    assert!(
+        cx.debug_bounds("filter-size-error").is_some(),
+        "the error is drawn beside its field"
+    );
+    cx.update(|window, cx| {
+        least.update(cx, |field, cx| field.set_value("300", window, cx));
+    });
+    update(&view, cx, Disktree::apply_sizes);
+    read(&view, cx, |app| {
+        let (side, why) = app.size_error.clone().expect("an error");
+        assert_eq!(side, 1);
+        assert!(why.starts_with("Max is below Min"), "{why}");
+    });
+    // Put right, the error goes; nothing is left greyed out meanwhile.
+    cx.update(|window, cx| {
+        least.update(cx, |field, cx| field.set_value("150", window, cx));
+    });
+    click(cx, "filter-apply");
+    read(&view, cx, |app| {
+        assert!(app.size_error.is_none());
+        assert_eq!(app.filter_least, Some(150 << 10));
+    });
+    assert!(cx.debug_bounds("filter-size-error").is_none());
 
     // Escape closes the menu and leaves the filter; Clear lifts it.
     press(cx, "escape");
@@ -2381,6 +2409,70 @@ fn each_size_has_its_own_unit(cx: &mut TestAppContext) {
     });
     assert!(cx.debug_bounds("filter-size-summary").is_some());
     assert!(cx.debug_bounds("filter-summary").is_some());
+    read(&view, cx, |app| {
+        assert_eq!(
+            app.filter_sentence(),
+            "Showing files of from 150 KiB to 1.0 MiB"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn the_filter_menu_is_walked_and_worked_by_keyboard(cx: &mut TestAppContext) {
+    use disktree_core::classify::Category;
+
+    cx.update(gpui_omarchy::init);
+    let temp = fixture();
+    let (view, cx) = view_over(temp.path(), cx);
+    draw(cx);
+    cx.update(|window, cx| {
+        view.update(cx, |app, cx| app.toggle_filter_menu(window, cx));
+    });
+    draw(cx);
+    // Nothing to clear, so no Clear button rather than a greyed one.
+    assert!(cx.debug_bounds("filter-clear").is_none());
+    assert_eq!(
+        read(&view, cx, Disktree::filter_sentence),
+        "Showing everything"
+    );
+
+    // The keyboard starts in the Min field: digits are text there, and
+    // Enter applies.
+    press(cx, "2 0 0 enter");
+    draw(cx);
+    read(&view, cx, |app| {
+        assert_eq!(app.filter_least, Some(200 << 20));
+        assert!(app.filter_menu);
+    });
+    assert!(cx.debug_bounds("filter-clear").is_some());
+
+    // Shift+Tab walks back out of the field to the kinds above it, the
+    // last of them first, and Space ticks the one in focus.
+    press(cx, "shift-tab");
+    draw(cx);
+    // A control answers the key coming up, as a native button does.
+    let space = gpui_kit::Keystroke::parse("space").expect("a key");
+    cx.simulate_event(gpui_kit::KeyDownEvent {
+        keystroke: space.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_event(gpui_kit::KeyUpEvent { keystroke: space });
+    draw(cx);
+    read(&view, cx, |app| {
+        assert_eq!(
+            app.filter_kinds,
+            [*Category::LEGEND.last().expect("a kind")]
+        );
+        assert_eq!(app.filter_count(), 2);
+        assert!(app.filter_menu, "the menu stays for more");
+    });
+
+    // The way out is a button as well as a key.
+    let close = cx.debug_bounds("filter-done").expect("Close");
+    cx.simulate_click(close.center(), gpui_kit::Modifiers::none());
+    draw(cx);
+    assert!(!read(&view, cx, |app| app.filter_menu));
 }
 
 #[gpui_kit::test]
