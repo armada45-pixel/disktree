@@ -726,9 +726,13 @@ impl Disktree {
         self.focus_request = Some(FocusTarget::Dialog);
         // Removable media and network volumes can take seconds to answer.
         // Keep Escape and the window responsive while probing them.
+        // Another machine's root names no volume here: asking which one
+        // holds it would look up this machine's path of that name.
+        let local = self.remote.is_none();
         let task = cx.background_executor().spawn(async move {
             let mut volumes = disktree_core::space::volumes();
-            if let Some(root) = volume_root_for(&root_path)
+            if local
+                && let Some(root) = volume_root_for(&root_path)
                 && !volumes.iter().any(|volume| volume.point == root)
             {
                 volumes.push(disktree_core::space::Volume {
@@ -2590,6 +2594,13 @@ impl Disktree {
             }
         };
         self.notice = None;
+        // A path typed while another machine is on screen is this
+        // machine's, and is scanned as such: it is never looked for in
+        // the other machine's tree, where the same name may well exist.
+        if self.remote.is_some() {
+            self.set_root(directory, cx);
+            return true;
+        }
         let within = self
             .crumbs_for_path(&directory)
             .filter(|crumbs| self.node_at(crumbs).is_some_and(Node::is_dir));

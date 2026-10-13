@@ -1992,6 +1992,18 @@ fn another_machine_is_looked_at_and_never_acted_on(cx: &mut TestAppContext) {
         app.begin_removal(cx);
         assert_eq!(app.screen, Screen::Explore);
     });
+    // A path typed now is this machine's. It is scanned as one, and never
+    // looked for in the other machine's tree, though that tree happens
+    // to hold a directory of the same name here.
+    let junk = dunce::canonicalize(temp.path().join("junk")).expect("junk");
+    let typed = junk.display().to_string();
+    assert!(update(&view, cx, |app, cx| app.go_to_path(&typed, cx)));
+    read(&view, cx, |app| {
+        assert!(app.remote.is_none());
+        assert_eq!(app.root_path, junk);
+        assert!(app.scan.is_some(), "a local scan of it, not a step");
+    });
+    finish_scan(&view, cx);
     // A local root is a local scan again, with everything it allows.
     let root = temp.path().to_path_buf();
     update(&view, cx, |app, cx| app.set_root(root, cx));
