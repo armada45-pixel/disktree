@@ -4,11 +4,83 @@
 //! are none, and gpui-omarchy would then stay on its dark default whatever
 //! the system is set to; there the app follows the system appearance instead,
 //! with the crate's own dark and light palettes, and switches when it does.
+//!
+//! Either can be overruled: a [`ThemeChoice`] of light or dark stays put
+//! whatever the desktop does, until the choice goes back to the system's.
 
 use std::path::Path;
 
 use gpui_kit::{App, Window, WindowAppearance};
 use gpui_omarchy::Theme;
+
+/// Whose palette is drawn: the system's, or one picked here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemeChoice {
+    /// The Omarchy theme, or the system's light or dark setting.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|choice| choice.key() == value)
+    }
+
+    /// The choice after this one, for a control that steps through them.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::System => Self::Light,
+            Self::Light => Self::Dark,
+            Self::Dark => Self::System,
+        }
+    }
+}
+
+/// The choice in force, where the appearance observer can see it: a system
+/// that turns dark at dusk must not repaint a window that was told light.
+struct Chosen(ThemeChoice);
+
+impl gpui_kit::Global for Chosen {}
+
+/// Draw with `choice` from now on. `appearance` is the window's, used when
+/// the choice is the system's and there is no Omarchy theme to follow.
+pub fn choose(
+    choice: ThemeChoice,
+    appearance: WindowAppearance,
+    home: Option<&Path>,
+    cx: &mut App,
+) {
+    cx.set_global(Chosen(choice));
+    match choice {
+        ThemeChoice::Light => Theme::flexoki_light().apply(cx),
+        ThemeChoice::Dark => Theme::tokyo_night().apply(cx),
+        ThemeChoice::System if follows_system(home) => apply(appearance, cx),
+        // Back to the Omarchy theme files, which an explicit theme stopped
+        // watching.
+        ThemeChoice::System => Theme::follow_system(cx),
+    }
+}
 
 /// Whether the system appearance, rather than an Omarchy theme, decides the
 /// colours: unless an Omarchy theme is installed, on macOS and Windows, and
@@ -52,13 +124,33 @@ pub fn apply(appearance: WindowAppearance, cx: &mut App) {
 /// Follow `window`'s appearance from now on.
 pub fn follow(window: &Window) {
     window
-        .observe_window_appearance(|window, cx| apply(window.appearance(), cx))
+        .observe_window_appearance(|window, cx| {
+            let chosen = cx
+                .try_global::<Chosen>()
+                .map_or(ThemeChoice::System, |chosen| chosen.0);
+            if chosen == ThemeChoice::System {
+                apply(window.appearance(), cx);
+            }
+        })
         .detach();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_theme_control_steps_through_every_choice_and_back() {
+        let mut choice = ThemeChoice::default();
+        for expected in
+            [ThemeChoice::Light, ThemeChoice::Dark, ThemeChoice::System]
+        {
+            choice = choice.next();
+            assert_eq!(choice, expected);
+            assert_eq!(ThemeChoice::parse(choice.key()), Some(choice));
+        }
+        assert_eq!(ThemeChoice::parse("plaid"), None);
+    }
 
     #[test]
     fn a_linux_desktop_is_followed_only_if_it_states_a_preference() {
